@@ -9,6 +9,10 @@ This repository is intentionally not the Intern Atlas website. It contains the
 reusable local builder, local API, and a small client for the hosted Intern Atlas
 API.
 
+## For Online API
+
+The API document is here: https://jcnc4nyy2d5p.feishu.cn/wiki/EL1sw9XqAizaCYkGoxpcPAoNnKc
+
 ## What It Builds
 
 The local graph has:
