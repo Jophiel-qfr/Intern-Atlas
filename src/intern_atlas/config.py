@@ -41,9 +41,20 @@ def _split_models(value: str) -> tuple[str, ...]:
 
 
 def project_root(start: str | Path | None = None) -> Path:
-    """Return the current repository root without assuming a fixed drive path."""
+    """Return the repository root without depending on the current directory.
 
-    candidate = Path(start or Path.cwd()).resolve()
+    In the source checkout, ``__file__`` resolves to
+    ``app/src/intern_atlas/config.py``.  Starting there keeps defaults stable
+    when a CLI command is launched from a different working directory.  The
+    explicit ``start`` argument remains available for tests and callers that
+    need to resolve another checkout.
+    """
+
+    candidate = (
+        Path(start).resolve()
+        if start is not None
+        else Path(__file__).resolve().parents[2]
+    )
     for path in (candidate, *candidate.parents):
         if (path / ".git").exists():
             return path
@@ -101,4 +112,3 @@ def get_settings(start: str | Path | None = None) -> Settings:
         cors_origins=cors_origins,
         ui_language=_first_env("INTERN_ATLAS_UI_LANGUAGE", default="zh-CN"),
     )
-
