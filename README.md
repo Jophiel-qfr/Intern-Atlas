@@ -30,10 +30,25 @@ The output is a SQLite database and, optionally, a JSON export.
 ```bash
 git clone https://github.com/OpenRaiser/Intern-Atlas.git
 cd Intern-Atlas
-python -m venv .venv
-source .venv/bin/activate
 pip install -e .
 ```
+
+Use the existing project environment when one is already provided. Keep the
+environment outside the repository and do not create a second environment in
+`app`.
+
+## Runtime Paths And Language
+
+Generated databases default to `../data/local_method_graph.db` when running
+from this checkout. Cache and log directories default to `../cache` and
+`../logs`. Override them with `INTERN_ATLAS_DATA_DIR`,
+`INTERN_ATLAS_CACHE_DIR`, `INTERN_ATLAS_LOG_DIR`, and
+`INTERN_ATLAS_DB_PATH`, or pass an explicit `--out` path to `build`.
+
+The browser UI uses Simplified Chinese for fixed labels by default. Set
+`INTERN_ATLAS_UI_LANGUAGE=en-US` to keep the fixed labels in English. Paper
+titles, author names, model names, dataset names, abbreviations, API names, and
+quoted evidence remain in their original form.
 
 ## Configure An LLM
 
@@ -209,6 +224,11 @@ Supported input types:
 - CSV with at least `title,abstract`
 
 See [docs/LOCAL_GRAPH_BUILDER.md](docs/LOCAL_GRAPH_BUILDER.md).
+
+The initial HAR schema is available as `intern_atlas.analysis.HARAnalysis`.
+It records optional dimensions such as sensor modality, input representation,
+base model, temporal modeling, fusion, datasets, experimental evidence, and
+generalization. It is a data contract only; it does not run batch LLM analysis.
 
 ## Security
 

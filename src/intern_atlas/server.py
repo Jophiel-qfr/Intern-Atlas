@@ -1,12 +1,12 @@
 """FastAPI app for querying a local Intern Atlas SQLite graph."""
 
-import os
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from .db import connect, graph_stats, paper_summary
+from .config import get_settings
 from .evidence import (
     bfs_papers,
     build_evidence_pack,
@@ -17,7 +17,7 @@ from .evidence import (
     subgraph,
 )
 from .remote import InternAtlasClient
-from .ui import INDEX_HTML
+from .ui import get_index_html
 
 
 def create_app(db_path: str | Path):
@@ -35,11 +35,7 @@ def create_app(db_path: str | Path):
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
     )
-    extra_origins = [
-        origin.strip()
-        for origin in os.getenv("INTERN_ATLAS_CORS_ORIGINS", "").split(",")
-        if origin.strip()
-    ]
+    extra_origins = list(get_settings().cors_origins)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=extra_origins,
@@ -149,7 +145,7 @@ def create_app(db_path: str | Path):
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> str:
-        return INDEX_HTML
+        return get_index_html()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:

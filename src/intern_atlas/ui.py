@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-INDEX_HTML = r"""<!doctype html>
+from .i18n import localize_ui_html
+
+
+INDEX_TEMPLATE = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -1376,3 +1379,10 @@ INDEX_HTML = r"""<!doctype html>
   </script>
 </body>
 </html>"""
+
+
+def get_index_html(language: str | None = None) -> str:
+    return localize_ui_html(INDEX_TEMPLATE, language=language)
+
+
+INDEX_HTML = get_index_html()

@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 
 from .builder import build_from_sources
+from .config import get_settings
 from .db import connect, graph_stats
 from .remote import DEFAULT_HOSTED_BASE_URL, InternAtlasClient
 
@@ -21,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     p_build = sub.add_parser("build", help="Build a local method-evolution graph.")
     p_build.add_argument("--input", action="append", default=[], help="TXT/JSON/JSONL/CSV file or directory.")
     p_build.add_argument("--pdf-dir", action="append", default=[], help="Directory containing PDF files.")
-    p_build.add_argument("--out", type=Path, default=Path("outputs/local_method_graph.db"))
+    p_build.add_argument("--out", type=Path, default=get_settings().database_path)
     p_build.add_argument("--json", type=Path, default=None, help="Optional JSON export path.")
     p_build.add_argument("--no-llm", action="store_true", help="Use heuristic extraction only.")
     p_build.add_argument("--max-papers", type=int, default=0)

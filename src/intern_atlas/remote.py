@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from .config import DEFAULT_REMOTE_BASE_URL, get_settings
 
-DEFAULT_HOSTED_BASE_URL = "https://intern-atlas.opendatalab.org.cn/api"
+
+DEFAULT_HOSTED_BASE_URL = DEFAULT_REMOTE_BASE_URL
 
 
 def normalize_hosted_base_url(base_url: str) -> str:
@@ -32,9 +33,10 @@ class InternAtlasClient:
         api_key: str | None = None,
         timeout_seconds: float = 120.0,
     ) -> None:
-        configured_base_url = base_url or os.getenv("INTERN_ATLAS_REMOTE_BASE_URL") or DEFAULT_HOSTED_BASE_URL
+        settings = get_settings()
+        configured_base_url = base_url or settings.remote_base_url or DEFAULT_HOSTED_BASE_URL
         self.base_url = normalize_hosted_base_url(configured_base_url)
-        self.api_key = api_key or os.getenv("INTERN_ATLAS_API_KEY") or os.getenv("INTERN_ATLAS_REMOTE_API_KEY")
+        self.api_key = api_key or settings.remote_api_key
         self._client = httpx.Client(timeout=timeout_seconds)
 
     def close(self) -> None:

@@ -17,11 +17,14 @@ dist/
 *.db-*
 *.sqlite
 *.sqlite3
+*.sqlite-*
 *.jsonl
 
 outputs/
 data/
 papers/
+cache/
+logs/
 
 .DS_Store
 
