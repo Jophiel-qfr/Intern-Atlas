@@ -315,6 +315,75 @@ INDEX_TEMPLATE = r"""<!doctype html>
       box-shadow: var(--shadow);
       overflow: hidden;
     }
+    .discovery-panel { margin-bottom: 16px; }
+    .discovery-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 8px;
+      padding: 15px;
+      border-bottom: 1px solid var(--line);
+    }
+    .discovery-controls input { min-width: 0; }
+    .discovery-status {
+      padding: 0 15px 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .discovery-target {
+      padding: 0 15px 15px;
+    }
+    .discovery-columns {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0;
+      border-top: 1px solid var(--line);
+    }
+    .discovery-column {
+      min-width: 0;
+      padding: 13px 15px;
+    }
+    .discovery-column + .discovery-column { border-left: 1px solid var(--line); }
+    .discovery-column h4 { margin: 0 0 8px; font-size: 13px; }
+    .candidate-list { display: grid; gap: 8px; }
+    .candidate-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px;
+      background: var(--panel-soft);
+    }
+    .candidate-card label {
+      display: flex;
+      gap: 7px;
+      align-items: flex-start;
+      margin: 0;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: none;
+    }
+    .candidate-card input { width: 16px; flex: 0 0 auto; margin-top: 2px; }
+    .candidate-title { overflow-wrap: anywhere; line-height: 1.35; }
+    .candidate-meta, .candidate-reason {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .candidate-badge {
+      display: inline-block;
+      margin-top: 6px;
+      border-radius: 999px;
+      background: #e8f1ee;
+      color: var(--green);
+      padding: 2px 7px;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .candidate-badge.background_candidate { color: var(--muted); background: #eef0f1; }
+    .candidate-badge.uncertain { color: var(--amber); background: #fff1dc; }
+    .candidate-abstract { margin-top: 6px; color: #3f4b57; font-size: 11px; line-height: 1.45; }
+    .discovery-actions { display: flex; gap: 8px; padding: 0 15px 15px; }
     .panel-head {
       min-height: 54px;
       display: flex;
@@ -500,12 +569,14 @@ INDEX_TEMPLATE = r"""<!doctype html>
       .workspace { grid-template-columns: 1fr; }
       .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
-    @media (max-width: 720px) {
+      @media (max-width: 720px) {
       .main, .sidebar { padding: 16px; }
       .hero { flex-direction: column; }
       .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .split, .triple, .download-grid, .side-actions { grid-template-columns: 1fr; }
       .graph-wrap { height: 360px; }
+      .discovery-controls, .discovery-columns { grid-template-columns: 1fr; }
+      .discovery-column + .discovery-column { border-left: 0; border-top: 1px solid var(--line); }
     }
   </style>
 </head>
@@ -634,6 +705,35 @@ INDEX_TEMPLATE = r"""<!doctype html>
         <div id="statusPill" class="status-pill">Ready</div>
       </div>
 
+      <section id="discoveryPanel" class="panel discovery-panel">
+        <div class="panel-head">
+          <div>
+            <h3>Paper Discovery</h3>
+            <span>Find one paper and inspect limited first-level citation candidates</span>
+          </div>
+        </div>
+        <div class="discovery-controls">
+          <input id="discoveryQuery" placeholder="Paper title / DOI / arXiv / Semantic Scholar ID" />
+          <button id="resolveDiscoveryBtn" type="button">Find paper</button>
+          <button id="lineageDiscoveryBtn" type="button" class="secondary" disabled>Find references and citations</button>
+        </div>
+        <div id="discoveryStatus" class="discovery-status">Enter a title, DOI, arXiv ID, or Semantic Scholar paperId.</div>
+        <div id="discoveryTarget" class="discovery-target"></div>
+        <div class="discovery-columns">
+          <div class="discovery-column">
+            <h4>References</h4>
+            <div id="discoveryReferences" class="candidate-list"><div class="empty">Resolve a paper to see references.</div></div>
+          </div>
+          <div class="discovery-column">
+            <h4>Citations</h4>
+            <div id="discoveryCitations" class="candidate-list"><div class="empty">Resolve a paper to see citations.</div></div>
+          </div>
+        </div>
+        <div class="discovery-actions">
+          <button id="exportDiscoveryBtn" type="button" class="secondary" disabled>Export selected candidates</button>
+        </div>
+      </section>
+
       <div class="metric-grid">
         <div class="metric"><strong id="viewPapers">0</strong><span>Evidence papers</span></div>
         <div class="metric"><strong id="viewEdges">0</strong><span>Method edges</span></div>
@@ -736,7 +836,191 @@ INDEX_TEMPLATE = r"""<!doctype html>
       busy: false,
       view: 'empty',
       neighborhood: null,
+      discovery: {
+        resolution: null,
+        lineage: null,
+        selectedTargetId: null,
+        selected: { reference: new Set(), citation: new Set() },
+      },
     };
+
+    async function resolveDiscoveryPaper() {
+      const query = $('discoveryQuery').value.trim();
+      if (!query) {
+        setDiscoveryStatus('Enter a title, DOI, arXiv ID, or Semantic Scholar paperId.');
+        return;
+      }
+      state.discovery.resolution = null;
+      state.discovery.lineage = null;
+      state.discovery.selectedTargetId = null;
+      state.discovery.selected = { reference: new Set(), citation: new Set() };
+      $('lineageDiscoveryBtn').disabled = true;
+      $('exportDiscoveryBtn').disabled = true;
+      $('discoveryReferences').innerHTML = '<div class="empty">Resolve a paper to see references.</div>';
+      $('discoveryCitations').innerHTML = '<div class="empty">Resolve a paper to see citations.</div>';
+      $('discoveryTarget').innerHTML = '';
+      setDiscoveryStatus('Loading paper metadata...');
+      try {
+        const data = await api('/api/v1/discovery/resolve', {
+          method: 'POST',
+          body: JSON.stringify({ query }),
+        });
+        state.discovery.resolution = data;
+        renderDiscoveryResolution(data);
+        if (data.paper) {
+          state.discovery.selectedTargetId = data.paper.paper_id;
+          $('lineageDiscoveryBtn').disabled = false;
+          setDiscoveryStatus(data.cached ? 'Paper metadata loaded from cache.' : 'Paper metadata loaded.');
+        } else if (data.selection_required) {
+          setDiscoveryStatus('Review matches and select a paper before loading lineage.');
+        } else {
+          setDiscoveryStatus('No matching paper found.');
+        }
+      } catch (error) {
+        setDiscoveryStatus(`Discovery failed: ${error.message || error}`);
+      }
+    }
+
+    async function loadDiscoveryLineage() {
+      const query = $('discoveryQuery').value.trim();
+      if (!query) return;
+      if (!state.discovery.selectedTargetId) {
+        setDiscoveryStatus('Review matches and select a paper before loading lineage.');
+        return;
+      }
+      $('lineageDiscoveryBtn').disabled = true;
+      setDiscoveryStatus('Loading references and citations...');
+      try {
+        const data = await api('/api/v1/discovery/lineage', {
+          method: 'POST',
+          body: JSON.stringify({
+            query,
+            paper_id: state.discovery.selectedTargetId,
+            max_references: 30,
+            max_citations: 30,
+          }),
+        });
+        state.discovery.lineage = data;
+        state.discovery.selected = { reference: new Set(), citation: new Set() };
+        renderDiscoveryLineage(data);
+        setDiscoveryStatus(data.cached ? 'References and citations loaded from cache.' : 'References and citations loaded.');
+      } catch (error) {
+        setDiscoveryStatus(`Discovery failed: ${error.message || error}`);
+      } finally {
+        $('lineageDiscoveryBtn').disabled = false;
+      }
+    }
+
+    function renderDiscoveryResolution(data) {
+      const paper = data.paper;
+      if (!paper) {
+        $('discoveryTarget').innerHTML = data.matches?.length
+          ? `
+            <div class="meta">Review the matches and select one paper before continuing.</div>
+            <div class="discovery-match-list">
+              ${(data.matches || []).map((match, index) => `
+                <label class="candidate-card">
+                  <input type="radio" name="discoveryTargetPaper" data-discovery-target="true" data-paper-id="${escapeHtml(match.paper_id)}" />
+                  <span>
+                    <span class="candidate-title">${escapeHtml(match.title || match.paper_id)}</span>
+                    <span class="candidate-meta">${escapeHtml([match.year, (match.authors || []).join(', '), match.venue].filter(Boolean).join(' · '))}</span>
+                    <span class="candidate-meta">${escapeHtml(match.paper_id)}${match.match_score != null ? ` · match: ${match.match_score}` : ''}</span>
+                  </span>
+                </label>
+              `).join('')}
+            </div>
+          `
+          : '';
+        $('lineageDiscoveryBtn').disabled = true;
+        $('discoveryTarget').querySelectorAll('[data-discovery-target]').forEach((radio) => {
+          radio.addEventListener('change', () => {
+            state.discovery.selectedTargetId = radio.dataset.paperId;
+            $('lineageDiscoveryBtn').disabled = false;
+            setDiscoveryStatus('Paper selected. You can now load references and citations.');
+          });
+        });
+        return;
+      }
+      const ids = Object.entries(paper.external_ids || {})
+        .map(([key, value]) => `${escapeHtml(key)}: ${escapeHtml(value)}`)
+        .join(' · ');
+      const matchNote = (data.matches || []).length > 1
+        ? '<div class="meta">Multiple matches returned; review the candidate metadata.</div>'
+        : '';
+      $('discoveryTarget').innerHTML = `
+        <div class="candidate-badge">Selected paper candidate</div>
+        <div class="title">${escapeHtml(paper.title || paper.paper_id)}</div>
+        <div class="meta">${escapeHtml([paper.year, (paper.authors || []).join(', '), paper.venue].filter(Boolean).join(' · '))}</div>
+        <div class="meta">${escapeHtml(ids)}${paper.citation_count != null ? ` · citations: ${paper.citation_count}` : ''}</div>
+        ${paper.url ? `<div class="meta"><a href="${escapeHtml(paper.url)}" target="_blank" rel="noreferrer">Semantic Scholar</a></div>` : ''}
+        ${matchNote}
+      `;
+    }
+
+    function renderDiscoveryLineage(data) {
+      renderDiscoveryCandidates('discoveryReferences', data.references || [], 'reference');
+      renderDiscoveryCandidates('discoveryCitations', data.citations || [], 'citation');
+      $('exportDiscoveryBtn').disabled = false;
+    }
+
+    function renderDiscoveryCandidates(elementId, candidates, direction) {
+      if (!candidates.length) {
+        $(elementId).innerHTML = '<div class="empty">No candidates returned.</div>';
+        return;
+      }
+      $(elementId).innerHTML = candidates.map((candidate) => {
+        const paper = candidate;
+        const checked = state.discovery.selected[direction].has(paper.paper_id) ? ' checked' : '';
+        const badgeClass = candidate.candidate_level || 'uncertain';
+        const badgeText = candidateLabel(candidate.candidate_level);
+        const meta = [paper.year, (paper.authors || []).slice(0, 4).join(', '), paper.venue].filter(Boolean).join(' · ');
+        const reason = (candidate.reasons || []).slice(0, 2).join(' · ');
+        return `
+          <div class="candidate-card">
+            <label>
+              <input type="checkbox" data-discovery-checkbox="true" data-direction="${direction}" data-paper-id="${escapeHtml(paper.paper_id)}"${checked} />
+              <span>
+                <span class="candidate-title">${escapeHtml(paper.title || paper.paper_id)}</span>
+                <span class="candidate-meta">${escapeHtml(meta)}</span>
+                <span class="candidate-badge ${escapeHtml(badgeClass)}">${escapeHtml(badgeText)}</span>
+              </span>
+            </label>
+            ${reason ? `<div class="candidate-reason">${escapeHtml(reason)}</div>` : ''}
+            ${paper.abstract ? `<details><summary>View abstract</summary><div class="candidate-abstract">${escapeHtml(short(paper.abstract, 420))}</div></details>` : ''}
+          </div>
+        `;
+      }).join('');
+      $(elementId).querySelectorAll('[data-discovery-checkbox]').forEach((checkbox) => {
+        checkbox.addEventListener('change', () => {
+          const bucket = state.discovery.selected[checkbox.dataset.direction];
+          if (checkbox.checked) bucket.add(checkbox.dataset.paperId);
+          else bucket.delete(checkbox.dataset.paperId);
+        });
+      });
+    }
+
+    function candidateLabel(level) {
+      if (level === 'method_candidate') return 'Method candidate';
+      if (level === 'background_candidate') return 'Background candidate';
+      return 'Uncertain';
+    }
+
+    function setDiscoveryStatus(text) {
+      $('discoveryStatus').textContent = text;
+    }
+
+    function exportDiscoverySelection() {
+      const data = state.discovery.lineage;
+      if (!data) return;
+      const selected = (items, direction) => (items || []).filter((item) => state.discovery.selected[direction].has(item.paper_id));
+      const payload = {
+        target: data.target,
+        selected_references: selected(data.references, 'reference'),
+        selected_citations: selected(data.citations, 'citation'),
+      };
+      downloadFile('intern-atlas-discovery-selection.json', JSON.stringify(payload, null, 2), 'application/json');
+      setDiscoveryStatus('Selected candidates exported.');
+    }
 
     async function api(path, opts = {}) {
       const res = await fetch(path, {
@@ -1368,6 +1652,12 @@ INDEX_TEMPLATE = r"""<!doctype html>
     $('downloadPapersBtn').addEventListener('click', downloadPapersCsv);
     $('downloadEdgesBtn').addEventListener('click', downloadEdgesCsv);
     $('downloadContextBtn').addEventListener('click', downloadContextMd);
+    $('resolveDiscoveryBtn').addEventListener('click', resolveDiscoveryPaper);
+    $('lineageDiscoveryBtn').addEventListener('click', loadDiscoveryLineage);
+    $('exportDiscoveryBtn').addEventListener('click', exportDiscoverySelection);
+    $('discoveryQuery').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') resolveDiscoveryPaper();
+    });
     $('query').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') runEvidenceSearch();
     });

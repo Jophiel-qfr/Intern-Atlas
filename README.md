@@ -230,6 +230,24 @@ It records optional dimensions such as sensor modality, input representation,
 base model, temporal modeling, fusion, datasets, experimental evidence, and
 generalization. It is a data contract only; it does not run batch LLM analysis.
 
+## Semantic Scholar Discovery
+
+The local API provides a bounded, metadata-only discovery flow:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/discovery/lineage" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"DeepConvLSTM: A Deep Convolutional LSTM Network for Activity Recognition Using Wearables"}'
+```
+
+It accepts paper titles, DOI, arXiv IDs, and Semantic Scholar paper IDs. Each
+request retrieves at most 30 first-level references and 30 first-level
+citations, then ranks candidates using citation metadata and lightweight term
+overlap. It does not claim method inheritance and does not download PDFs or
+embeddings. Set `SEMANTIC_SCHOLAR_API_KEY` if the public Academic Graph API
+rate limit is insufficient. Responses are cached under the configured cache
+directory.
+
 ## Security
 
 Do not commit `.env`, API keys, generated SQLite databases, or PDF corpora.

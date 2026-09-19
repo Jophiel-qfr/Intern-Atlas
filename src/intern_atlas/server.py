@@ -7,6 +7,7 @@ import httpx
 
 from .db import connect, graph_stats, paper_summary
 from .config import get_settings
+from .discovery import DiscoveryService
 from .evidence import (
     bfs_papers,
     build_evidence_pack,
@@ -17,16 +18,19 @@ from .evidence import (
     subgraph,
 )
 from .remote import InternAtlasClient
+from .integrations.semantic_scholar import SemanticScholarError
 from .ui import get_index_html
 
 
-def create_app(db_path: str | Path):
+def create_app(db_path: str | Path, discovery_service: DiscoveryService | None = None):
     from fastapi import FastAPI, HTTPException, Query
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse
     from pydantic import BaseModel, Field
 
     conn = connect(db_path, readonly=True)
+    discovery = discovery_service or DiscoveryService()
+    owns_discovery = discovery_service is None
     app = FastAPI(
         title="Intern Atlas Local API",
         version="0.1.0",
@@ -60,6 +64,14 @@ def create_app(db_path: str | Path):
         edge_type: str | None = Field(None, max_length=80)
         method: str | None = Field(None, max_length=200)
         include_prompt_context: bool = True
+
+    class DiscoveryResolveRequest(BaseModel):
+        query: str = Field(..., min_length=1, max_length=500)
+
+    class DiscoveryLineageRequest(DiscoveryResolveRequest):
+        paper_id: str | None = Field(None, min_length=1, max_length=200)
+        max_references: int = Field(30, ge=1, le=50)
+        max_citations: int = Field(30, ge=1, le=50)
 
     class RemoteConfigRequest(BaseModel):
         base_url: str | None = Field(None, max_length=500)
@@ -150,6 +162,8 @@ def create_app(db_path: str | Path):
     @app.on_event("shutdown")
     def _shutdown() -> None:
         conn.close()
+        if owns_discovery:
+            discovery.close()
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -174,6 +188,8 @@ def create_app(db_path: str | Path):
                 "GET /api/papers/{paper_id}",
                 "GET /api/edges",
                 "POST /api/v1/evidence/context",
+                "POST /api/v1/discovery/resolve",
+                "POST /api/v1/discovery/lineage",
                 "GET /api/v1/methods/search?q=...",
                 "GET /api/v1/evolution/edges",
                 "POST /api/v1/remote/health",
@@ -304,6 +320,31 @@ def create_app(db_path: str | Path):
             method=req.method,
             include_prompt_context=req.include_prompt_context,
         )
+
+    @app.post("/api/v1/discovery/resolve")
+    def v1_discovery_resolve(req: DiscoveryResolveRequest) -> dict[str, Any]:
+        try:
+            return discovery.resolve(req.query).to_dict()
+        except SemanticScholarError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+
+    @app.post("/api/v1/discovery/lineage")
+    def v1_discovery_lineage(req: DiscoveryLineageRequest) -> dict[str, Any]:
+        try:
+            return discovery.discover_lineage(
+                req.query,
+                max_references=req.max_references,
+                max_citations=req.max_citations,
+                paper_id=req.paper_id,
+            ).to_dict()
+        except SemanticScholarError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
 
     @app.post("/api/assist/context")
     def assist_context(req: QueryRequest) -> dict[str, Any]:
