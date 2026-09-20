@@ -67,6 +67,7 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
 
     class DiscoveryResolveRequest(BaseModel):
         query: str = Field(..., min_length=1, max_length=500)
+        provider: str | None = Field(None, max_length=40)
 
     class DiscoveryLineageRequest(DiscoveryResolveRequest):
         paper_id: str | None = Field(None, min_length=1, max_length=200)
@@ -324,7 +325,7 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
     @app.post("/api/v1/discovery/resolve")
     def v1_discovery_resolve(req: DiscoveryResolveRequest) -> dict[str, Any]:
         try:
-            return discovery.resolve(req.query).to_dict()
+            return discovery.resolve(req.query, provider=req.provider).to_dict()
         except SemanticScholarError as exc:
             raise HTTPException(
                 status_code=exc.status_code,
@@ -339,6 +340,7 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
                 max_references=req.max_references,
                 max_citations=req.max_citations,
                 paper_id=req.paper_id,
+                provider=req.provider,
             ).to_dict()
         except SemanticScholarError as exc:
             raise HTTPException(

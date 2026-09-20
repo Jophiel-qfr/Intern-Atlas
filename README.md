@@ -230,23 +230,26 @@ It records optional dimensions such as sensor modality, input representation,
 base model, temporal modeling, fusion, datasets, experimental evidence, and
 generalization. It is a data contract only; it does not run batch LLM analysis.
 
-## Semantic Scholar Discovery
+## Paper Discovery
 
-The local API provides a bounded, metadata-only discovery flow:
+The local API provides a bounded, metadata-only discovery flow. OpenAlex is the
+default provider; Semantic Scholar remains available by passing
+`"provider":"semantic_scholar"`.
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/v1/discovery/lineage" \
   -H "Content-Type: application/json" \
-  -d '{"query":"DeepConvLSTM: A Deep Convolutional LSTM Network for Activity Recognition Using Wearables"}'
+  -d '{"query":"DeepConvLSTM: A Deep Convolutional LSTM Network for Activity Recognition Using Wearables", "provider":"openalex"}'
 ```
 
-It accepts paper titles, DOI, arXiv IDs, and Semantic Scholar paper IDs. Each
-request retrieves at most 30 first-level references and 30 first-level
-citations, then ranks candidates using citation metadata and lightweight term
-overlap. It does not claim method inheritance and does not download PDFs or
-embeddings. Set `SEMANTIC_SCHOLAR_API_KEY` if the public Academic Graph API
-rate limit is insufficient. Responses are cached under the configured cache
-directory.
+OpenAlex accepts paper titles, DOI, OpenAlex Work IDs, and full OpenAlex URLs.
+Semantic Scholar accepts paper titles, DOI, arXiv IDs, and Semantic Scholar
+paper IDs. Each request retrieves at most 30 first-level references and 30
+first-level citations, then ranks candidates with lightweight HAR term overlap.
+It does not claim method inheritance and does not download PDFs or embeddings.
+OpenAlex works without an API key; optional `OPENALEX_API_KEY` and
+`SEMANTIC_SCHOLAR_API_KEY` values can be configured for their respective
+providers. Responses are cached under the configured cache directory.
 
 ## Security
 

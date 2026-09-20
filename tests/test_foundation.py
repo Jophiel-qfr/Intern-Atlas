@@ -28,6 +28,9 @@ def test_settings_default_runtime_data_is_outside_app(tmp_path, monkeypatch):
         "INTERN_ATLAS_CACHE_DIR",
         "INTERN_ATLAS_LOG_DIR",
         "INTERN_ATLAS_DB_PATH",
+        "OPENALEX_BASE_URL",
+        "OPENALEX_API_KEY",
+        "OPENALEX_CACHE_TTL_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
     settings = get_settings(tmp_path)
@@ -35,6 +38,21 @@ def test_settings_default_runtime_data_is_outside_app(tmp_path, monkeypatch):
     assert settings.database_path == tmp_path / "data" / "local_method_graph.db"
     assert settings.cache_dir == tmp_path / "cache"
     assert settings.log_dir == tmp_path / "logs"
+    assert settings.openalex_base_url == "https://api.openalex.org"
+    assert settings.openalex_api_key == ""
+    assert settings.openalex_cache_ttl_seconds == 7 * 24 * 60 * 60
+
+
+def test_openalex_settings_respect_environment_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENALEX_BASE_URL", "https://openalex.example/v1")
+    monkeypatch.setenv("OPENALEX_API_KEY", "test-key")
+    monkeypatch.setenv("OPENALEX_CACHE_TTL_SECONDS", "123")
+
+    settings = get_settings(tmp_path)
+
+    assert settings.openalex_base_url == "https://openalex.example/v1"
+    assert settings.openalex_api_key == "test-key"
+    assert settings.openalex_cache_ttl_seconds == 123
 
 
 def test_settings_default_paths_follow_source_checkout(monkeypatch, tmp_path):

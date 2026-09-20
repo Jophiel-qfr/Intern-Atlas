@@ -18,6 +18,8 @@ DEFAULT_LLM_MODEL = "gpt-4o-mini"
 DEFAULT_REMOTE_BASE_URL = "https://intern-atlas.opendatalab.org.cn/api"
 DEFAULT_SEMANTIC_SCHOLAR_BASE_URL = "https://api.semanticscholar.org/graph/v1"
 DEFAULT_SEMANTIC_SCHOLAR_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_OPENALEX_BASE_URL = "https://api.openalex.org"
+DEFAULT_OPENALEX_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def _first_env(*names: str, default: str = "") -> str:
@@ -83,6 +85,9 @@ class Settings:
     semantic_scholar_base_url: str
     semantic_scholar_api_key: str
     semantic_scholar_cache_ttl_seconds: int
+    openalex_base_url: str
+    openalex_api_key: str
+    openalex_cache_ttl_seconds: int
     cors_origins: tuple[str, ...]
     ui_language: str
 
@@ -121,6 +126,14 @@ def get_settings(start: str | Path | None = None) -> Settings:
         semantic_scholar_cache_ttl_seconds=_positive_int_env(
             "SEMANTIC_SCHOLAR_CACHE_TTL_SECONDS",
             default=DEFAULT_SEMANTIC_SCHOLAR_CACHE_TTL_SECONDS,
+        ),
+        openalex_base_url=_first_env(
+            "OPENALEX_BASE_URL", default=DEFAULT_OPENALEX_BASE_URL
+        ).rstrip("/"),
+        openalex_api_key=_first_env("OPENALEX_API_KEY"),
+        openalex_cache_ttl_seconds=_positive_int_env(
+            "OPENALEX_CACHE_TTL_SECONDS",
+            default=DEFAULT_OPENALEX_CACHE_TTL_SECONDS,
         ),
         cors_origins=cors_origins,
         ui_language=_first_env("INTERN_ATLAS_UI_LANGUAGE", default="zh-CN"),

@@ -381,13 +381,21 @@ def test_discovery_api_uses_injected_client_and_bounds_limits(tmp_path):
     service, client = make_service(tmp_path, calls)
     try:
         with TestClient(create_app(db_path, discovery_service=service)) as api:
-            resolved = api.post("/api/v1/discovery/resolve", json={"query": "10.1000/target"})
+            resolved = api.post(
+                "/api/v1/discovery/resolve",
+                json={"query": "10.1000/target", "provider": "semantic_scholar"},
+            )
             assert resolved.status_code == 200
             assert resolved.json()["paper"]["paper_id"] == "target-paper"
 
             lineage = api.post(
                 "/api/v1/discovery/lineage",
-                json={"query": "10.1000/target", "max_references": 1, "max_citations": 1},
+                json={
+                    "query": "10.1000/target",
+                    "provider": "semantic_scholar",
+                    "max_references": 1,
+                    "max_citations": 1,
+                },
             )
             assert lineage.status_code == 200
             assert len(lineage.json()["references"]) <= 1

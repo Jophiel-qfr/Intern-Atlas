@@ -293,6 +293,7 @@ def test_ui_exposes_real_controls(tmp_path):
             'id="remoteHealthBtn"',
             'id="discoveryPanel"',
             'id="discoveryQuery"',
+            'id="discoveryProvider"',
             'id="resolveDiscoveryBtn"',
             'id="lineageDiscoveryBtn"',
             'id="exportDiscoveryBtn"',
@@ -307,5 +308,6 @@ def test_ui_exposes_real_controls(tmp_path):
             "/api/v1/evidence/context",
             "/api/v1/discovery/resolve",
             "/api/v1/discovery/lineage",
+            'value="openalex"',
         ):
             assert marker in html

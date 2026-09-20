@@ -713,11 +713,15 @@ INDEX_TEMPLATE = r"""<!doctype html>
           </div>
         </div>
         <div class="discovery-controls">
-          <input id="discoveryQuery" placeholder="Paper title / DOI / arXiv / Semantic Scholar ID" />
+          <select id="discoveryProvider" aria-label="Discovery data source">
+            <option value="openalex" selected>OpenAlex</option>
+            <option value="semantic_scholar">Semantic Scholar</option>
+          </select>
+          <input id="discoveryQuery" placeholder="Paper title / DOI / OpenAlex ID" />
           <button id="resolveDiscoveryBtn" type="button">Find paper</button>
           <button id="lineageDiscoveryBtn" type="button" class="secondary" disabled>Find references and citations</button>
         </div>
-        <div id="discoveryStatus" class="discovery-status">Enter a title, DOI, arXiv ID, or Semantic Scholar paperId.</div>
+        <div id="discoveryStatus" class="discovery-status">Enter a paper title, DOI, or provider ID.</div>
         <div id="discoveryTarget" class="discovery-target"></div>
         <div class="discovery-columns">
           <div class="discovery-column">
@@ -847,7 +851,7 @@ INDEX_TEMPLATE = r"""<!doctype html>
     async function resolveDiscoveryPaper() {
       const query = $('discoveryQuery').value.trim();
       if (!query) {
-        setDiscoveryStatus('Enter a title, DOI, arXiv ID, or Semantic Scholar paperId.');
+        setDiscoveryStatus('Enter a paper title, DOI, or provider ID.');
         return;
       }
       state.discovery.resolution = null;
@@ -863,7 +867,7 @@ INDEX_TEMPLATE = r"""<!doctype html>
       try {
         const data = await api('/api/v1/discovery/resolve', {
           method: 'POST',
-          body: JSON.stringify({ query }),
+          body: JSON.stringify({ query, provider: $('discoveryProvider').value }),
         });
         state.discovery.resolution = data;
         renderDiscoveryResolution(data);
@@ -895,6 +899,7 @@ INDEX_TEMPLATE = r"""<!doctype html>
           method: 'POST',
           body: JSON.stringify({
             query,
+            provider: $('discoveryProvider').value,
             paper_id: state.discovery.selectedTargetId,
             max_references: 30,
             max_citations: 30,
@@ -944,15 +949,17 @@ INDEX_TEMPLATE = r"""<!doctype html>
       const ids = Object.entries(paper.external_ids || {})
         .map(([key, value]) => `${escapeHtml(key)}: ${escapeHtml(value)}`)
         .join(' · ');
+      const providerLabel = paper.provider === 'openalex' ? 'OpenAlex' : 'Semantic Scholar';
       const matchNote = (data.matches || []).length > 1
         ? '<div class="meta">Multiple matches returned; review the candidate metadata.</div>'
         : '';
       $('discoveryTarget').innerHTML = `
         <div class="candidate-badge">Selected paper candidate</div>
         <div class="title">${escapeHtml(paper.title || paper.paper_id)}</div>
+        <div class="meta">Data source: ${escapeHtml(providerLabel)}</div>
         <div class="meta">${escapeHtml([paper.year, (paper.authors || []).join(', '), paper.venue].filter(Boolean).join(' · '))}</div>
         <div class="meta">${escapeHtml(ids)}${paper.citation_count != null ? ` · citations: ${paper.citation_count}` : ''}</div>
-        ${paper.url ? `<div class="meta"><a href="${escapeHtml(paper.url)}" target="_blank" rel="noreferrer">Semantic Scholar</a></div>` : ''}
+        ${paper.url ? `<div class="meta"><a href="${escapeHtml(paper.url)}" target="_blank" rel="noreferrer">${escapeHtml(providerLabel)}</a></div>` : ''}
         ${matchNote}
       `;
     }
