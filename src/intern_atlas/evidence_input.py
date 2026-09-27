@@ -227,16 +227,28 @@ def discovered_paper_to_evidence_package(
 _SECTION_HEADINGS = {
     "abstract": "abstract",
     "introduction": "introduction",
+    "state of the art": "related_work",
     "related work": "related_work",
+    "literature review": "related_work",
     "background": "background",
     "method": "methods",
     "methods": "methods",
     "methodology": "methods",
     "approach": "methods",
     "model": "methods",
+    "architecture": "methods",
+    "network architecture": "methods",
+    "proposed architecture": "methods",
+    "proposed method": "methods",
+    "proposed model": "methods",
+    "framework": "methods",
     "experiments": "experiments",
     "experimental setup": "experiments",
+    "evaluation": "experiments",
     "results": "results",
+    "results and discussion": "results",
+    "experimental results": "results",
+    "evaluation results": "results",
     "discussion": "discussion",
     "conclusion": "conclusion",
     "conclusions": "conclusion",
@@ -251,6 +263,10 @@ def _heading_info(line: str, current_section: str) -> tuple[str, str] | None:
     title = numbered.group(2) if numbered else value
     normalized = re.sub(r"[\s:.-]+$", "", title.casefold()).strip()
     section = _SECTION_HEADINGS.get(normalized)
+    # These generic labels commonly occur in tables. Accept them only when
+    # explicitly numbered; plural Methods and Methodology remain unambiguous.
+    if not numbered and normalized in {"method", "model"}:
+        section = None
     if section:
         return section, title
     # A numbered subsection such as "3.1 Network Architecture" updates the
@@ -264,6 +280,18 @@ def _clean_pdf_lines(lines: list[str]) -> str:
     # Join visual line wraps while retaining all lexical characters, including
     # hyphens, formulas, digits, model names, and citation markers.
     return re.sub(r"[\t ]+", " ", " ".join(line.strip() for line in lines)).strip()
+
+
+def _is_references_heading(line: str) -> bool:
+    """Recognize only a standalone, optional top-level numbered bibliography heading."""
+
+    value = line.strip().strip("# ")
+    numbered = _NUMBERED_HEADING_RE.match(value)
+    if numbered and "." in numbered.group(1):
+        return False
+    title = numbered.group(2) if numbered else value
+    normalized = re.sub(r"[\s:.-]+$", "", title.casefold()).strip()
+    return normalized in {"references", "bibliography"}
 
 
 def _pdf_paragraphs(raw_text: str) -> list[tuple[str, bool]]:
@@ -282,6 +310,18 @@ def _pdf_paragraphs(raw_text: str) -> list[tuple[str, bool]]:
         stripped = line.strip()
         if not stripped:
             flush()
+            continue
+        if _is_references_heading(stripped):
+            flush()
+            entries.append((stripped, True))
+            continue
+        inline_abstract = re.match(r"^abstract\s*:\s*(.*)$", stripped, re.IGNORECASE)
+        if inline_abstract:
+            flush()
+            entries.append(("Abstract", True))
+            abstract_text = inline_abstract.group(1).strip()
+            if abstract_text:
+                pending.append(abstract_text)
             continue
         heading = _heading_info(stripped, "methods")
         # Parse clear heading lines independently from wrapped body text.
@@ -317,6 +357,7 @@ def pdf_to_evidence_chunks(
     section = "unknown"
     active_heading: str | None = None
     extracted_any_text = False
+    references_started = False
     try:
         with fitz.open(pdf_path) as document:
             title = (
@@ -333,6 +374,9 @@ def pdf_to_evidence_chunks(
                     if raw_text.strip():
                         extracted_any_text = True
                     for text, is_heading in _pdf_paragraphs(raw_text):
+                        if _is_references_heading(text):
+                            references_started = True
+                            break
                         if is_heading:
                             heading = _heading_info(text, section)
                             if heading:
@@ -364,6 +408,10 @@ def pdf_to_evidence_chunks(
                                     metadata=metadata,
                                 )
                             )
+                    if references_started:
+                        break
+                if references_started:
+                    break
     except EvidenceExtractionError:
         raise
     except Exception as exc:

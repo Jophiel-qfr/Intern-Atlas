@@ -111,6 +111,100 @@ def test_pdf_chunks_keep_pages_sections_and_section_inheritance(tmp_path) -> Non
     assert all(chunk.chunk_type == "paragraph" for chunk in chunks)
 
 
+def test_pdf_section_detection_handles_inline_and_numbered_headings(tmp_path) -> None:
+    pdf_path = tmp_path / "section-headings.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    lines = [
+        "Method",
+        "Description",
+        "Table row describing a model.",
+        "Abstract: Human activity recognition uses wearable sensors.",
+        "1. Introduction",
+        "Introduction body text.",
+        "2. State of the Art",
+        "Prior work body text.",
+        "3. Architecture",
+        "Architecture body text.",
+        "3.1 DeepConvLSTM",
+        "DeepConvLSTM subsection text.",
+        "3.3 Model Implementation and Training",
+        "Implementation subsection text.",
+        "4. Experimental Setup",
+        "Experimental setup body text.",
+        "5. Results and Discussion",
+        "Results body text.",
+        "6. Conclusions",
+        "Conclusion body text.",
+    ]
+    for index, text in enumerate(lines):
+        page.insert_text((48, 40 + index * 28), text, fontsize=10)
+    document.save(pdf_path)
+    document.close()
+
+    chunks = pdf_to_evidence_chunks(pdf_path, paper_id="headings-paper")
+
+    def containing(fragment: str):
+        return next(chunk for chunk in chunks if fragment in chunk.text)
+
+    abstract = containing("Human activity recognition uses wearable sensors")
+    assert abstract.section == "abstract"
+    assert abstract.text == "Human activity recognition uses wearable sensors."
+
+    assert containing("Introduction body text").section == "introduction"
+    assert containing("Prior work body text").section == "related_work"
+    assert containing("Architecture body text").section == "methods"
+    assert containing("DeepConvLSTM subsection text").section == "methods"
+    assert containing("Implementation subsection text").section == "methods"
+    assert containing("Experimental setup body text").section == "experiments"
+    assert containing("Results body text").section == "results"
+    assert containing("Conclusion body text").section == "conclusion"
+
+    table_labels = [chunk for chunk in chunks if chunk.text in {"Method", "Description"}]
+    assert table_labels
+    assert all(chunk.section == "unknown" for chunk in table_labels)
+
+
+@pytest.mark.parametrize("heading", ["References", "bIbLiOgRaPhY"])
+def test_pdf_stops_extracting_at_references_heading(tmp_path, heading) -> None:
+    pdf_path = tmp_path / "references.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((48, 50), "6. Conclusions", fontsize=11)
+    page.insert_text((48, 72), "Conclusion text remains evidence.", fontsize=10)
+    page.insert_text((48, 110), heading, fontsize=11)
+    page.insert_text((48, 132), "A reference entry that must be excluded.", fontsize=10)
+    page.insert_text((48, 154), "Later text after the bibliography.", fontsize=10)
+    document.save(pdf_path)
+    document.close()
+
+    chunks = pdf_to_evidence_chunks(pdf_path, paper_id="references-paper")
+
+    assert any(chunk.section == "conclusion" and "Conclusion text" in chunk.text for chunk in chunks)
+    assert not any(
+        heading.casefold() in chunk.text.casefold()
+        or "reference entry" in chunk.text.casefold()
+        or "Later text" in chunk.text
+        for chunk in chunks
+    )
+
+
+def test_pdf_body_mention_of_references_does_not_stop_extraction(tmp_path) -> None:
+    pdf_path = tmp_path / "references-in-body.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((48, 50), "1. Introduction", fontsize=11)
+    page.insert_text((48, 72), "We discuss references to prior work in this section.", fontsize=10)
+    page.insert_text((48, 94), "This later paragraph should still be extracted.", fontsize=10)
+    document.save(pdf_path)
+    document.close()
+
+    chunks = pdf_to_evidence_chunks(pdf_path, paper_id="body-reference-paper")
+
+    assert any("references to prior work" in chunk.text for chunk in chunks)
+    assert any("later paragraph" in chunk.text for chunk in chunks)
+
+
 def test_pdf_minimal_line_cleanup_preserves_terms_numbers_and_citations(tmp_path) -> None:
     pdf_path = tmp_path / "wrapped.pdf"
     document = fitz.open()
