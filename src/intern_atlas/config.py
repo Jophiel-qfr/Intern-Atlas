@@ -8,6 +8,7 @@ of embedding machine-specific paths.  Defaults place generated data beside the
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +81,7 @@ class Settings:
     llm_base_url: str
     llm_api_key: str
     llm_models: tuple[str, ...]
+    llm_timeout_seconds: float
     remote_base_url: str
     remote_api_key: str
     semantic_scholar_base_url: str
@@ -101,9 +103,18 @@ def get_settings(start: str | Path | None = None) -> Settings:
     database_path = Path(
         _first_env("INTERN_ATLAS_DB_PATH", default=str(data_dir / "local_method_graph.db"))
     ).expanduser()
-    models = _split_models(
-        _first_env("S4S_LLM_MODELS", "S4S_LLM_MODEL", "OPENAI_MODEL", default=DEFAULT_LLM_MODEL)
-    ) or (DEFAULT_LLM_MODEL,)
+    configured_models = _first_env("S4S_LLM_MODELS", "LLM_MODELS")
+    if configured_models:
+        models = _split_models(configured_models) or (DEFAULT_LLM_MODEL,)
+    else:
+        models = (
+            _first_env(
+                "LLM_MODEL",
+                "S4S_LLM_MODEL",
+                "OPENAI_MODEL",
+                default=DEFAULT_LLM_MODEL,
+            ),
+        )
     cors_origins = tuple(
         item.strip()
         for item in os.environ.get("INTERN_ATLAS_CORS_ORIGINS", "").split(",")
@@ -114,9 +125,12 @@ def get_settings(start: str | Path | None = None) -> Settings:
         cache_dir=cache_dir,
         log_dir=log_dir,
         database_path=database_path,
-        llm_base_url=_first_env("S4S_LLM_BASE_URL", "OPENAI_BASE_URL", default=DEFAULT_LLM_BASE_URL).rstrip("/"),
-        llm_api_key=_first_env("S4S_LLM_API_KEY", "OPENAI_API_KEY"),
+        llm_base_url=_first_env(
+            "LLM_BASE_URL", "S4S_LLM_BASE_URL", "OPENAI_BASE_URL", default=DEFAULT_LLM_BASE_URL
+        ).rstrip("/"),
+        llm_api_key=_first_env("LLM_API_KEY", "S4S_LLM_API_KEY", "OPENAI_API_KEY"),
         llm_models=models,
+        llm_timeout_seconds=_positive_float_env("LLM_TIMEOUT_SECONDS", default=120.0),
         remote_base_url=_first_env("INTERN_ATLAS_REMOTE_BASE_URL", default=DEFAULT_REMOTE_BASE_URL),
         remote_api_key=_first_env("INTERN_ATLAS_API_KEY", "INTERN_ATLAS_REMOTE_API_KEY"),
         semantic_scholar_base_url=_first_env(
@@ -147,3 +161,12 @@ def _positive_int_env(name: str, *, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _positive_float_env(name: str, *, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 and math.isfinite(value) else default
