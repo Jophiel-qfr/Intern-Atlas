@@ -8,11 +8,14 @@ from intern_atlas.evidence_input import LineageEvidenceInput, PaperEvidenceChunk
 from intern_atlas.lineage_context import build_lineage_llm_context
 from intern_atlas.lineage_llm import (
     LineageLLMAuthenticationError,
+    LineageLLMConfigurationError,
     LineageLLMMalformedResponseError,
     LineageLLMRateLimitError,
     LineageLLMTimeoutError,
+    LineageLLMTruncatedResponseError,
     LineageLLMUpstreamError,
     OpenAICompatibleLineageClient,
+    build_lineage_system_prompt,
     build_lineage_messages,
 )
 from intern_atlas.lineage_response import (
@@ -93,8 +96,30 @@ def _http_json(payload, status_code=200):
     return httpx.Response(status_code, json=payload)
 
 
-def _completion(content: str):
-    return {"choices": [{"message": {"content": content}}]}
+def _completion(content: str, finish_reason=None):
+    return {"choices": [{"finish_reason": finish_reason, "message": {"content": content}}]}
+
+
+def test_lineage_prompt_lists_only_allowed_analysis_statuses() -> None:
+    prompt = build_lineage_system_prompt()
+
+    for status in ("confirmed", "probable", "uncertain", "insufficient_evidence"):
+        assert f"- {status}:" in prompt
+    assert "strong direct evidence from both papers" in prompt
+    assert "some comparison detail remains incomplete" in prompt
+    assert "insufficient for a reliable relation judgment" in prompt
+    assert "relation_type must be null" in prompt
+
+
+def test_lineage_prompt_forbids_invented_status_values_and_requests_concise_output() -> None:
+    prompt = build_lineage_system_prompt()
+
+    assert "Do not use any other status value" in prompt
+    for status in ("sufficient_evidence", "likely", "supported", "unknown"):
+        assert f'"{status}"' in prompt
+    assert "Return concise JSON only" in prompt
+    assert "Keep claim text short and evidence-grounded" in prompt
+    assert "Do not spend output tokens restating supplied evidence" in prompt
 
 
 def test_valid_confirmed_response_rebuilds_evidence_from_context() -> None:
@@ -331,6 +356,57 @@ def test_auth_settings_support_requested_environment_names(monkeypatch) -> None:
     assert settings.llm_timeout_seconds == 17.5
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("disabled", {"type": "disabled"}),
+        ("enabled", {"type": "enabled"}),
+    ],
+)
+def test_thinking_mode_is_only_sent_when_configured(monkeypatch, mode, expected) -> None:
+    if mode is None:
+        monkeypatch.delenv("LLM_THINKING_MODE", raising=False)
+    else:
+        monkeypatch.setenv("LLM_THINKING_MODE", mode)
+
+    captured_payloads = []
+
+    def handler(request):
+        captured_payloads.append(json.loads(request.content))
+        return _http_json(_completion("{}"))
+
+    client = OpenAICompatibleLineageClient(
+        base_url="https://mock.example/v1",
+        api_key="placeholder-key",
+        model="mock-model",
+        transport=httpx.MockTransport(handler),
+        sleep_fn=lambda delay: None,
+    )
+    try:
+        client.complete(_context())
+        payload = captured_payloads[0]
+        if expected is None:
+            assert "thinking" not in payload
+        else:
+            assert payload["thinking"] == expected
+    finally:
+        client.close()
+
+
+def test_invalid_thinking_mode_is_a_clear_configuration_error(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_THINKING_MODE", "automatic")
+
+    with pytest.raises(LineageLLMConfigurationError, match="LLM_THINKING_MODE"):
+        OpenAICompatibleLineageClient(
+            api_key="placeholder-key",
+            transport=httpx.MockTransport(
+                lambda request: _http_json(_completion("{}"))
+            ),
+        )
+
+
 def test_http_401_is_clear_and_never_echoes_api_key() -> None:
     key = "dummy-not-a-real-key"
     transport = httpx.MockTransport(lambda request: _http_json({"error": "unauthorized"}, 401))
@@ -413,6 +489,42 @@ def test_missing_or_malformed_http_content_is_reported(payload) -> None:
     try:
         with pytest.raises(LineageLLMMalformedResponseError):
             client.complete(_context())
+    finally:
+        client.close()
+
+
+def test_finish_reason_length_raises_safe_truncation_error() -> None:
+    client = OpenAICompatibleLineageClient(
+        api_key="placeholder-key",
+        transport=httpx.MockTransport(
+            lambda request: _http_json(_completion('{"partial":', finish_reason="length"))
+        ),
+        sleep_fn=lambda delay: None,
+    )
+    try:
+        with pytest.raises(
+            LineageLLMTruncatedResponseError,
+            match="truncated because the output token limit was reached",
+        ):
+            client.complete(_context())
+    finally:
+        client.close()
+
+
+def test_finish_reason_stop_keeps_valid_response_flow() -> None:
+    client = OpenAICompatibleLineageClient(
+        api_key="placeholder-key",
+        transport=httpx.MockTransport(
+            lambda request: _http_json(
+                _completion(json.dumps(_response()), finish_reason="stop")
+            )
+        ),
+        sleep_fn=lambda delay: None,
+    )
+    try:
+        parsed = client.analyze(_context())
+        assert parsed.analysis_status == "confirmed"
+        assert parsed.relation_type == "improves"
     finally:
         client.close()
 

@@ -82,6 +82,7 @@ class Settings:
     llm_api_key: str
     llm_models: tuple[str, ...]
     llm_timeout_seconds: float
+    llm_thinking_mode: str | None
     remote_base_url: str
     remote_api_key: str
     semantic_scholar_base_url: str
@@ -131,6 +132,7 @@ def get_settings(start: str | Path | None = None) -> Settings:
         llm_api_key=_first_env("LLM_API_KEY", "S4S_LLM_API_KEY", "OPENAI_API_KEY"),
         llm_models=models,
         llm_timeout_seconds=_positive_float_env("LLM_TIMEOUT_SECONDS", default=120.0),
+        llm_thinking_mode=_llm_thinking_mode_env(),
         remote_base_url=_first_env("INTERN_ATLAS_REMOTE_BASE_URL", default=DEFAULT_REMOTE_BASE_URL),
         remote_api_key=_first_env("INTERN_ATLAS_API_KEY", "INTERN_ATLAS_REMOTE_API_KEY"),
         semantic_scholar_base_url=_first_env(
@@ -152,6 +154,15 @@ def get_settings(start: str | Path | None = None) -> Settings:
         cors_origins=cors_origins,
         ui_language=_first_env("INTERN_ATLAS_UI_LANGUAGE", default="zh-CN"),
     )
+
+
+def _llm_thinking_mode_env() -> str | None:
+    value = os.environ.get("LLM_THINKING_MODE", "").strip().lower()
+    if value not in {"", "disabled", "enabled"}:
+        raise ValueError(
+            "Invalid LLM_THINKING_MODE; expected 'disabled', 'enabled', or an empty value."
+        )
+    return value or None
 
 
 def _positive_int_env(name: str, *, default: int) -> int:
