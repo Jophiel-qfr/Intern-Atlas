@@ -1726,6 +1726,20 @@ LOCAL_PAPERS_TEMPLATE = r"""<!doctype html>
     .error { color: #a42318; }
     .overview { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
     .count { border: 1px solid #d9ddd7; border-radius: 8px; background: #faf8f4; padding: 9px 11px; }
+    .selection-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .selection-grid label { display: grid; gap: 6px; font-weight: 700; }
+    select { min-height: 40px; border: 1px solid #cbd2d0; border-radius: 7px; background: #fff; padding: 7px 9px; font: inherit; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+    button.secondary { background: #526477; }
+    .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .result-item { padding: 10px; border: 1px solid #e2e5e0; border-radius: 8px; background: #fafaf8; }
+    .result-item h4 { margin: 0 0 6px; }
+    .result-item p, .result-item ul { margin: 0; white-space: pre-wrap; line-height: 1.5; }
+    .lineage-flow { display: grid; justify-items: center; text-align: center; gap: 5px; padding: 14px; border-radius: 8px; background: #f4f7f8; }
+    .lineage-flow strong { font-size: 17px; overflow-wrap: anywhere; }
+    .lineage-arrow { color: #526477; font-size: 20px; }
+    .evidence-card { margin: 8px 0; padding: 10px; border-left: 3px solid #0f766e; background: #fafaf8; }
+    .evidence-card p { margin: 6px 0 0; white-space: pre-wrap; line-height: 1.5; }
     .count strong { margin-left: 5px; }
     details.section { margin: 10px 0; border: 1px solid #e2e5e0; border-radius: 8px; background: #fff; }
     details.section > summary { padding: 12px; cursor: pointer; font-weight: 750; }
@@ -1735,7 +1749,7 @@ LOCAL_PAPERS_TEMPLATE = r"""<!doctype html>
     .meta { margin: 0 0 8px; font-size: 12px; }
     .chunk-text { margin: 0; white-space: pre-wrap; line-height: 1.55; font-size: 14px; }
     [hidden] { display: none !important; }
-    @media (max-width: 620px) { main { padding: 18px 12px 40px; } .paper-row { align-items: flex-start; flex-direction: column; } }
+    @media (max-width: 620px) { main { padding: 18px 12px 40px; } .paper-row { align-items: flex-start; flex-direction: column; } .selection-grid, .result-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1746,6 +1760,34 @@ LOCAL_PAPERS_TEMPLATE = r"""<!doctype html>
     <section class="panel" aria-label="Local PDF list">
       <div id="paperStatus" class="status" role="status">Loading local papers...</div>
       <div id="paperList" class="paper-list"></div>
+    </section>
+    <section class="panel" aria-labelledby="lineageHeading">
+      <h2 id="lineageHeading">Method evolution analysis</h2>
+      <p class="intro">The source paper is the earlier or comparison method; the target paper is the one whose inheritance, changes, or extensions you want to examine. Choose Paper A and Paper B yourself; they are not ordered automatically by year.</p>
+      <div class="selection-grid">
+        <label>Source paper (Paper A)
+          <select id="sourcePaperSelect"><option value="">Select a local PDF</option></select>
+        </label>
+        <label>Target paper (Paper B)
+          <select id="targetPaperSelect"><option value="">Select a local PDF</option></select>
+        </label>
+      </div>
+      <p id="lineageHelp" class="meta">At least two local papers are required for method evolution analysis.</p>
+      <div class="actions">
+        <button id="previewLineageBtn" type="button" disabled>Preview analysis evidence (free)</button>
+        <button id="analyzeLineageBtn" class="secondary" type="button" disabled>Call LLM analysis (may incur API costs)</button>
+      </div>
+      <div id="lineageStatus" class="status" role="status" aria-live="polite"></div>
+    </section>
+    <section id="lineagePreviewPanel" class="panel" hidden>
+      <h2>Analysis evidence preview (does not call the API)</h2>
+      <div id="lineagePreviewSummary"></div>
+      <div id="lineageWarnings"></div>
+      <div id="lineagePreviewEvidence"></div>
+    </section>
+    <section id="lineageResultPanel" class="panel" hidden>
+      <h2>Method evolution analysis result</h2>
+      <div id="lineageResult"></div>
     </section>
     <section id="evidencePanel" class="panel" hidden>
       <h2 id="paperTitle"></h2>
@@ -1771,8 +1813,8 @@ LOCAL_PAPERS_TEMPLATE = r"""<!doctype html>
     function sectionLabel(section) {
       return SECTION_LABELS[section] || section.replaceAll('_', ' ');
     }
-    async function requestJson(url) {
-      const response = await fetch(url);
+    async function requestJson(url, options = {}) {
+      const response = await fetch(url, options);
       let data = {};
       try { data = await response.json(); } catch (_) {}
       if (!response.ok) throw new Error(data.detail || 'Request failed.');
@@ -1782,6 +1824,7 @@ LOCAL_PAPERS_TEMPLATE = r"""<!doctype html>
       const status = $('paperStatus');
       try {
         const papers = await requestJson('/api/local/papers');
+        populatePaperSelectors(papers);
         if (!papers.length) {
           status.textContent = 'No PDF files found in data/papers.';
           return;
@@ -1798,6 +1841,154 @@ LOCAL_PAPERS_TEMPLATE = r"""<!doctype html>
         status.textContent = error.message || 'Could not load local papers.';
       }
     }
+    let loadedPaperCount = 0;
+    let lastPreviewKey = '';
+    function lineageKey() {
+      return `${$('sourcePaperSelect').value}\n${$('targetPaperSelect').value}`;
+    }
+    function populatePaperSelectors(papers) {
+      loadedPaperCount = papers.length;
+      for (const id of ['sourcePaperSelect', 'targetPaperSelect']) {
+        const select = $(id);
+        select.innerHTML = '<option value="">Select a local PDF</option>' + papers.map((paper) =>
+          `<option value="${escapeHtml(paper.filename)}">${escapeHtml(paper.filename)}</option>`
+        ).join('');
+      }
+      updateLineageButtons();
+    }
+    function updateLineageButtons() {
+      const source = $('sourcePaperSelect').value;
+      const target = $('targetPaperSelect').value;
+      const distinct = source && target && source.toLocaleLowerCase() !== target.toLocaleLowerCase();
+      $('previewLineageBtn').disabled = loadedPaperCount < 2 || !distinct;
+      $('analyzeLineageBtn').disabled = !distinct || lastPreviewKey !== lineageKey();
+      $('lineageHelp').textContent = loadedPaperCount < 2
+        ? 'At least two local papers are required for method evolution analysis.'
+        : source && target && !distinct
+          ? 'Source and target papers must be different.'
+          : 'Choose two different local PDF files. Preview is free and does not call an LLM.';
+    }
+    function onPaperPairChanged() {
+      lastPreviewKey = '';
+      $('lineagePreviewPanel').hidden = true;
+      $('lineageResultPanel').hidden = true;
+      $('lineageStatus').classList.remove('error');
+      $('lineageStatus').textContent = '';
+      updateLineageButtons();
+    }
+    $('sourcePaperSelect').addEventListener('change', onPaperPairChanged);
+    $('targetPaperSelect').addEventListener('change', onPaperPairChanged);
+    function postLineage(url) {
+      return requestJson(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_filename: $('sourcePaperSelect').value,
+          target_filename: $('targetPaperSelect').value
+        })
+      });
+    }
+    function renderPreviewEvidence(items, heading) {
+      if (!items.length) return `<h3>${escapeHtml(heading)}</h3><p class="meta">No evidence selected.</p>`;
+      return `<h3>${escapeHtml(heading)}</h3><p class="meta">Selected ${items.length} evidence chunks</p>` +
+        items.map((item) => `<details class="section"><summary>${escapeHtml(item.evidence_id)} · ${escapeHtml(sectionLabel(item.section))}${item.page ? ` · PDF page ${escapeHtml(item.page)}` : ''}</summary><div class="chunks"><article class="chunk"><p class="meta">${escapeHtml(item.location || 'Location unavailable')} · ${escapeHtml(item.source_kind)}</p><p class="chunk-text">${escapeHtml(item.text)}</p></article></div></details>`).join('');
+    }
+    function renderLineagePreview(data) {
+      $('lineagePreviewSummary').innerHTML = `
+        <p><strong>Source paper:</strong> ${escapeHtml(data.source.paper_title)} · ${escapeHtml(data.source.filename)} · <strong>Selected:</strong> ${data.source_evidence.length}</p>
+        <p><strong>Target paper:</strong> ${escapeHtml(data.target.paper_title)} · ${escapeHtml(data.target.filename)} · <strong>Selected:</strong> ${data.target_evidence.length}</p>
+        <p><strong>Estimated input text characters:</strong> ${escapeHtml(data.total_characters)}</p>`;
+      $('lineageWarnings').innerHTML = data.warnings.length
+        ? `<h3>Warnings</h3><ul>${data.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>` : '';
+      $('lineagePreviewEvidence').innerHTML = renderPreviewEvidence(data.source_evidence, 'Source paper evidence (S IDs)') +
+        renderPreviewEvidence(data.target_evidence, 'Target paper evidence (T IDs)');
+      $('lineagePreviewPanel').hidden = false;
+    }
+    $('previewLineageBtn').addEventListener('click', async () => {
+      const button = $('previewLineageBtn');
+      const requestedKey = lineageKey();
+      button.disabled = true;
+      $('lineageStatus').classList.remove('error');
+      $('lineageStatus').textContent = 'Preparing evidence preview...';
+      try {
+        const data = await postLineage('/api/local/lineage/preview');
+        if (requestedKey !== lineageKey()) return;
+        renderLineagePreview(data);
+        lastPreviewKey = requestedKey;
+        $('lineageStatus').textContent = 'Evidence preview is ready. Review it before choosing whether to call the LLM.';
+      } catch (error) {
+        $('lineageStatus').classList.add('error');
+        $('lineageStatus').textContent = error.message || 'Could not prepare evidence preview.';
+      } finally {
+        updateLineageButtons();
+      }
+    });
+    const STATUS_LABELS = {
+      confirmed: 'Confirmed', probable: 'Probable', uncertain: 'Uncertain',
+      insufficient_evidence: 'Insufficient evidence'
+    };
+    const RELATION_LABELS = {
+      extends: 'Extends', improves: 'Improves', replaces: 'Replaces', adapts: 'Adapts',
+      combines: 'Combines', uses_component: 'Uses component'
+    };
+    function renderEvidenceItems(items) {
+      if (!items || !items.length) return '<p class="meta">No evidence attached.</p>';
+      return items.map((item) => `<article class="evidence-card"><strong>${escapeHtml(item.paper_title || item.paper_id)}</strong><div class="meta">${escapeHtml(item.location || 'Location unavailable')}${item.section ? ` · ${escapeHtml(sectionLabel(item.section))}` : ''} · ${escapeHtml(item.source_kind || '')}</div><p>${escapeHtml(item.quote || '')}</p></article>`).join('');
+    }
+    function renderClaimSection(title, value) {
+      const values = Array.isArray(value) ? value : (value == null || value === '' ? [] : [value]);
+      return `<section class="result-item"><h4>${escapeHtml(title)}</h4>${values.length ? `<ul>${values.map((item) => `<li>${escapeHtml(typeof item === 'string' ? item : JSON.stringify(item))}</li>`).join('')}</ul>` : '<p class="meta">—</p>'}</section>`;
+    }
+    function renderLineageResult(data) {
+      const analysis = data.analysis;
+      const status = STATUS_LABELS[analysis.analysis_status] || analysis.analysis_status;
+      const relation = analysis.relation_type ? `${RELATION_LABELS[analysis.relation_type] || analysis.relation_type} (${analysis.relation_type})` : '—';
+      const changes = (analysis.method_changes || []).map((change) => `
+        <details class="section"><summary>${escapeHtml(change.component)} · ${escapeHtml(change.change_type)}</summary><div class="chunks">
+          <p><strong>From:</strong> ${escapeHtml(change.from_value || '—')}　<strong>To:</strong> ${escapeHtml(change.to_value || '—')}</p>
+          <p>${escapeHtml(change.description || '')}</p><p class="meta">Confidence: ${escapeHtml(change.confidence == null ? '—' : change.confidence)}</p>
+          <details><summary>View evidence</summary>${renderEvidenceItems(change.evidence || [])}</details>
+        </div></details>`).join('') || '<p class="meta">No specific method changes returned.</p>';
+      $('lineageResult').innerHTML = `
+        <div class="lineage-flow"><strong>${escapeHtml(data.source.paper_title)}</strong><span class="lineage-arrow">↓ ${escapeHtml(relation)} ↓</span><strong>${escapeHtml(data.target.paper_title)}</strong></div>
+        <p><strong>Status:</strong> ${escapeHtml(status)} (${escapeHtml(analysis.analysis_status)}) · <strong>Confidence:</strong> ${escapeHtml(analysis.confidence == null ? '—' : analysis.confidence)}</p>
+        ${analysis.uncertainty ? `<p><strong>Uncertainty:</strong> ${escapeHtml(analysis.uncertainty)}</p>` : ''}
+        <div class="result-grid">
+          ${renderClaimSection('Inherited components', analysis.inherited_components)}
+          ${renderClaimSection('Changed components', analysis.changed_components)}
+          ${renderClaimSection('Added components', analysis.added_components)}
+          ${renderClaimSection('Removed components', analysis.removed_components)}
+          ${renderClaimSection('Problem addressed', analysis.problem_addressed)}
+          ${renderClaimSection('Claimed contribution', analysis.claimed_contribution)}
+          ${renderClaimSection('Experimental evidence', analysis.experimental_evidence)}
+          ${renderClaimSection('Limitations', analysis.limitations)}
+        </div>
+        <h3>Method changes</h3>${changes}
+        <details class="section"><summary>View all cited evidence (${(analysis.evidence || []).length})</summary><div class="chunks">${renderEvidenceItems(analysis.evidence || [])}</div></details>`;
+      $('lineageResultPanel').hidden = false;
+      $('lineageResultPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    $('analyzeLineageBtn').addEventListener('click', async () => {
+      if (lastPreviewKey !== lineageKey()) return;
+      const confirmed = window.confirm('This will call the configured LLM API and may incur costs. Continue?');
+      if (!confirmed) return;
+      const requestedKey = lineageKey();
+      const button = $('analyzeLineageBtn');
+      button.disabled = true;
+      $('lineageStatus').classList.remove('error');
+      $('lineageStatus').textContent = 'Calling the LLM for method evolution analysis...';
+      try {
+        const data = await postLineage('/api/local/lineage/analyze');
+        if (requestedKey !== lineageKey()) return;
+        renderLineageResult(data);
+        $('lineageStatus').textContent = 'Analysis complete.';
+      } catch (error) {
+        $('lineageStatus').classList.add('error');
+        $('lineageStatus').textContent = error.message || 'Method evolution analysis failed.';
+      } finally {
+        updateLineageButtons();
+      }
+    });
     function renderEvidence(data) {
       $('paperTitle').textContent = data.paper_title;
       $('paperMeta').textContent = `${data.paper_id} · ${data.chunk_count} evidence chunks`;

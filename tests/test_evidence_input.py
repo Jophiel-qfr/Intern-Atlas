@@ -165,6 +165,77 @@ def test_pdf_section_detection_handles_inline_and_numbered_headings(tmp_path) ->
     assert all(chunk.section == "unknown" for chunk in table_labels)
 
 
+def test_pdf_attention_paper_headings_switch_from_background_to_methods(tmp_path) -> None:
+    pdf_path = tmp_path / "attention-headings.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    lines = [
+        "BACKGROUND",
+        "Earlier work discusses attention models for activity recognition.",
+        "ATTENTION FOR HAR",
+        "Our attention module computes weights over sensor features.",
+        "DeepConvLSTM and Attention",
+        "The architecture adds attention after DeepConvLSTM layers.",
+        "EXPERIMENTS",
+        "We compare the attention architecture on HAR datasets.",
+    ]
+    for index, text in enumerate(lines):
+        page.insert_text((48, 45 + index * 32), text, fontsize=11)
+    document.save(pdf_path)
+    document.close()
+
+    chunks = pdf_to_evidence_chunks(pdf_path, paper_id="attention-paper")
+
+    assert [chunk.section for chunk in chunks] == [
+        "background", "methods", "methods", "experiments"
+    ]
+    assert "ATTENTION FOR HAR" in chunks[1].location
+    assert "DeepConvLSTM and Attention" in chunks[2].location
+    assert chunks[0].text == lines[1]
+    assert chunks[3].text == lines[7]
+
+
+def test_pdf_conservative_method_headings_ignore_attention_and_model_in_body(tmp_path) -> None:
+    pdf_path = tmp_path / "method-heading-variants.pdf"
+    headings = [
+        "Proposed Approach",
+        "Proposed Framework",
+        "Model Architecture",
+        "Network Architecture",
+        "Method Overview",
+        "Model Overview",
+        "Our Approach",
+        "Our Method",
+    ]
+    document = fitz.open()
+    page = document.new_page()
+    lines = [
+        "RELATED WORK",
+        "Prior work discusses attention mechanisms without proposing our method.",
+        "The model is described in a normal sentence here.",
+    ]
+    for index, heading in enumerate(headings):
+        lines.extend([heading, f"Architecture paragraph {index} describes the approach."])
+    lines.extend(["EXPERIMENTS", "We evaluate the proposed approach."])
+    for index, text in enumerate(lines):
+        page.insert_text((48, 30 + index * 27), text, fontsize=10)
+    document.save(pdf_path)
+    document.close()
+
+    chunks = pdf_to_evidence_chunks(pdf_path, paper_id="variant-paper")
+
+    prior_work = next(chunk for chunk in chunks if "Prior work discusses attention" in chunk.text)
+    assert prior_work.section == "related_work"
+    model_sentence = next(chunk for chunk in chunks if "The model is described" in chunk.text)
+    assert model_sentence.section == "related_work"
+    for index, heading in enumerate(headings):
+        body = next(chunk for chunk in chunks if f"Architecture paragraph {index}" in chunk.text)
+        assert body.section == "methods"
+        assert heading in body.location
+    experiment = next(chunk for chunk in chunks if "We evaluate" in chunk.text)
+    assert experiment.section == "experiments"
+
+
 @pytest.mark.parametrize("heading", ["References", "bIbLiOgRaPhY"])
 def test_pdf_stops_extracting_at_references_heading(tmp_path, heading) -> None:
     pdf_path = tmp_path / "references.pdf"

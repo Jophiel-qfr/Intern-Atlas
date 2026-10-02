@@ -23,9 +23,27 @@ from .integrations.semantic_scholar import SemanticScholarError
 from .local_papers import (
     InvalidLocalPaperName,
     LocalPaperNotFound,
+    SameLocalPaperSelection,
+    build_local_lineage_context,
     build_local_pdf_evidence,
     list_local_pdfs,
     resolve_local_pdf,
+)
+from .lineage_llm import (
+    LineageLLMAuthenticationError,
+    LineageLLMClientError,
+    LineageLLMConfigurationError,
+    LineageLLMMalformedResponseError,
+    LineageLLMRateLimitError,
+    LineageLLMTimeoutError,
+    LineageLLMTruncatedResponseError,
+    LineageLLMUpstreamError,
+    OpenAICompatibleLineageClient,
+)
+from .lineage_response import (
+    LineageResponseParseError,
+    LineageResponseValidationError,
+    build_method_lineage_analysis,
 )
 from .ui import get_index_html, get_local_papers_html
 
@@ -83,6 +101,10 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
         paper_id: str | None = Field(None, min_length=1, max_length=200)
         max_references: int = Field(30, ge=1, le=50)
         max_citations: int = Field(30, ge=1, le=50)
+
+    class LocalLineageRequest(BaseModel):
+        source_filename: str = Field(..., min_length=1, max_length=255)
+        target_filename: str = Field(..., min_length=1, max_length=255)
 
     class RemoteConfigRequest(BaseModel):
         base_url: str | None = Field(None, max_length=500)
@@ -203,6 +225,8 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
                 "GET /api/papers/{paper_id}",
                 "GET /api/local/papers",
                 "GET /api/local/papers/{filename}/evidence",
+                "POST /api/local/lineage/preview",
+                "POST /api/local/lineage/analyze",
                 "GET /api/edges",
                 "POST /api/v1/evidence/context",
                 "POST /api/v1/discovery/resolve",
@@ -248,6 +272,135 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
             raise HTTPException(status_code=422, detail=detail) from exc
         except OSError as exc:
             raise HTTPException(status_code=422, detail="读取该 PDF 失败。") from exc
+
+    def prepare_local_lineage(req: LocalLineageRequest):
+        try:
+            return build_local_lineage_context(
+                papers_dir, req.source_filename, req.target_filename
+            )
+        except SameLocalPaperSelection as exc:
+            raise HTTPException(status_code=400, detail="源论文和目标论文不能相同。") from exc
+        except InvalidLocalPaperName as exc:
+            raise HTTPException(status_code=400, detail="PDF 文件名无效。") from exc
+        except LocalPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="未找到所选本地 PDF 文件。") from exc
+        except EvidenceExtractionError as exc:
+            if "contains no extractable text" in str(exc).casefold():
+                detail = "所选 PDF 中没有可提取的文字；扫描版 PDF 暂不支持 OCR。"
+            else:
+                detail = "无法解析所选 PDF，请确认文件完整且格式有效。"
+            raise HTTPException(status_code=422, detail=detail) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=422, detail="读取所选 PDF 失败。") from exc
+
+    def selected_evidence_payload(context) -> list[dict[str, Any]]:
+        return [
+            {
+                "evidence_id": item.evidence_id,
+                "paper_role": item.paper_role,
+                "paper_id": item.paper_id,
+                "paper_title": item.paper_title,
+                "section": item.section,
+                "page": item.page,
+                "location": item.location,
+                "source_kind": item.source_kind,
+                "chunk_type": item.chunk_type,
+                "text": item.text,
+            }
+            for item in context.selected_evidence
+        ]
+
+    @app.post("/api/local/lineage/preview")
+    def preview_local_lineage(req: LocalLineageRequest) -> dict[str, Any]:
+        source, target, context = prepare_local_lineage(req)
+        selected = selected_evidence_payload(context)
+        return {
+            "source": source,
+            "target": target,
+            "selected_evidence_count": len(selected),
+            "total_characters": context.total_characters,
+            "warnings": list(context.warnings),
+            "source_evidence": [
+                item for item in selected if item["paper_role"] == "source"
+            ],
+            "target_evidence": [
+                item for item in selected if item["paper_role"] == "target"
+            ],
+        }
+
+    @app.post("/api/local/lineage/analyze")
+    def analyze_local_lineage(req: LocalLineageRequest) -> dict[str, Any]:
+        source, target, context = prepare_local_lineage(req)
+        client = None
+        try:
+            client = OpenAICompatibleLineageClient()
+            if not client.configured:
+                raise LineageLLMConfigurationError(
+                    "LLM API key is not configured."
+                )
+            llm_response = client.analyze(context, max_tokens=4000)
+            analysis = build_method_lineage_analysis(context, llm_response)
+            return {
+                "source": source,
+                "target": target,
+                "analysis": analysis.to_dict(),
+                "model": client.model,
+                "selected_evidence": selected_evidence_payload(context),
+                "warnings": list(context.warnings),
+            }
+        except LineageLLMConfigurationError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="尚未配置 LLM API Key，请先在本地环境中完成配置。",
+            ) from exc
+        except LineageLLMAuthenticationError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="LLM 认证失败，请检查本地 API 配置。",
+            ) from exc
+        except LineageLLMRateLimitError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail="LLM 服务当前请求过多，请稍后重试。",
+            ) from exc
+        except LineageLLMTimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="LLM 请求超时，请稍后重试。",
+            ) from exc
+        except LineageLLMTruncatedResponseError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="LLM 输出被截断，请稍后重试或调整模型输出设置。",
+            ) from exc
+        except (LineageLLMMalformedResponseError, LineageResponseParseError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="LLM 返回内容无法解析，请稍后重试。",
+            ) from exc
+        except LineageResponseValidationError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="LLM 返回的结论未通过本地证据校验。",
+            ) from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="LLM 返回内容未通过本地校验。",
+            ) from exc
+        except LineageLLMUpstreamError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="LLM 服务暂时不可用，请稍后重试。",
+            ) from exc
+        except LineageLLMClientError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="LLM 请求失败，请检查配置后重试。",
+            ) from exc
+        finally:
+            if client is not None:
+                client.close()
 
     @app.get("/api/papers")
     def list_papers(
