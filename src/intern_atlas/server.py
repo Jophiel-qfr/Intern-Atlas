@@ -8,6 +8,7 @@ import httpx
 from .db import connect, graph_stats, paper_summary
 from .config import get_settings
 from .discovery import DiscoveryService
+from .evidence_input import EvidenceExtractionError
 from .evidence import (
     bfs_papers,
     build_evidence_pack,
@@ -19,7 +20,14 @@ from .evidence import (
 )
 from .remote import InternAtlasClient
 from .integrations.semantic_scholar import SemanticScholarError
-from .ui import get_index_html
+from .local_papers import (
+    InvalidLocalPaperName,
+    LocalPaperNotFound,
+    build_local_pdf_evidence,
+    list_local_pdfs,
+    resolve_local_pdf,
+)
+from .ui import get_index_html, get_local_papers_html
 
 
 def create_app(db_path: str | Path, discovery_service: DiscoveryService | None = None):
@@ -39,7 +47,9 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
     )
-    extra_origins = list(get_settings().cors_origins)
+    settings = get_settings()
+    extra_origins = list(settings.cors_origins)
+    papers_dir = settings.data_dir / "papers"
     app.add_middleware(
         CORSMiddleware,
         allow_origins=extra_origins,
@@ -160,6 +170,10 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
     def index() -> str:
         return get_index_html()
 
+    @app.get("/local-papers", response_class=HTMLResponse, include_in_schema=False)
+    def local_papers_page() -> str:
+        return get_local_papers_html()
+
     @app.on_event("shutdown")
     def _shutdown() -> None:
         conn.close()
@@ -187,6 +201,8 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
                 "GET /api/stats",
                 "GET /api/papers/search?q=...",
                 "GET /api/papers/{paper_id}",
+                "GET /api/local/papers",
+                "GET /api/local/papers/{filename}/evidence",
                 "GET /api/edges",
                 "POST /api/v1/evidence/context",
                 "POST /api/v1/discovery/resolve",
@@ -206,6 +222,32 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
                 "POST /api/assist/context",
             ],
         }
+
+    @app.get("/api/local/papers")
+    def get_local_papers() -> list[dict[str, Any]]:
+        try:
+            return list_local_pdfs(papers_dir)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="无法读取本地论文目录。") from exc
+
+    @app.get("/api/local/papers/{filename}/evidence")
+    def get_local_paper_evidence(filename: str) -> dict[str, Any]:
+        try:
+            pdf_path = resolve_local_pdf(papers_dir, filename)
+        except InvalidLocalPaperName as exc:
+            raise HTTPException(status_code=400, detail="PDF 文件名无效。") from exc
+        except LocalPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="未找到该本地 PDF 文件。") from exc
+        try:
+            return build_local_pdf_evidence(pdf_path)
+        except EvidenceExtractionError as exc:
+            if "contains no extractable text" in str(exc).casefold():
+                detail = "PDF 中没有可提取的文字；扫描版 PDF 暂不支持 OCR。"
+            else:
+                detail = "无法解析该 PDF，请确认文件完整且格式有效。"
+            raise HTTPException(status_code=422, detail=detail) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=422, detail="读取该 PDF 失败。") from exc
 
     @app.get("/api/papers")
     def list_papers(

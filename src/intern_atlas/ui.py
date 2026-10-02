@@ -122,6 +122,19 @@ INDEX_TEMPLATE = r"""<!doctype html>
       color: var(--muted);
       font-size: 12px;
     }
+    .local-papers-link {
+      display: block;
+      margin: 0 0 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--blue);
+      padding: 10px 12px;
+      font-size: 13px;
+      font-weight: 760;
+      text-decoration: none;
+    }
+    .local-papers-link:hover { border-color: var(--blue); }
     .stats {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -590,6 +603,8 @@ INDEX_TEMPLATE = r"""<!doctype html>
           <p>Evidence layer for research agents</p>
         </div>
       </div>
+
+      <a class="local-papers-link" href="/local-papers">Local papers</a>
 
       <div class="stats">
         <div class="stat"><strong id="papersStat">-</strong><span>Papers</span></div>
@@ -1683,3 +1698,155 @@ def get_index_html(language: str | None = None) -> str:
 
 
 INDEX_HTML = get_index_html()
+
+
+LOCAL_PAPERS_TEMPLATE = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local papers</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2933; background: #f5f3ef; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1100px; margin: 0 auto; padding: 28px 20px 60px; }
+    a { color: #285f83; }
+    .back { display: inline-block; margin-bottom: 18px; font-size: 14px; }
+    h1 { margin: 0; font-size: 28px; }
+    .intro, .status, .meta { color: #637083; line-height: 1.5; }
+    .intro { margin: 7px 0 20px; }
+    .panel { margin: 14px 0; border: 1px solid #d9ddd7; border-radius: 10px; background: #fff; padding: 16px; }
+    .paper-list { display: grid; gap: 10px; }
+    .paper-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; border: 1px solid #e2e5e0; border-radius: 8px; padding: 12px; }
+    .paper-name { overflow-wrap: anywhere; font-weight: 700; }
+    button { min-height: 38px; flex: 0 0 auto; border: 0; border-radius: 7px; background: #285f83; color: white; padding: 8px 12px; font: inherit; font-weight: 700; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    .status { min-height: 22px; margin: 10px 0; }
+    .error { color: #a42318; }
+    .overview { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+    .count { border: 1px solid #d9ddd7; border-radius: 8px; background: #faf8f4; padding: 9px 11px; }
+    .count strong { margin-left: 5px; }
+    details.section { margin: 10px 0; border: 1px solid #e2e5e0; border-radius: 8px; background: #fff; }
+    details.section > summary { padding: 12px; cursor: pointer; font-weight: 750; }
+    .chunks { display: grid; gap: 10px; padding: 0 12px 12px; }
+    .chunk { border-left: 3px solid #0f766e; background: #fafaf8; padding: 10px 12px; overflow-wrap: anywhere; }
+    .chunk-label { margin: 0 0 5px; font-size: 13px; }
+    .meta { margin: 0 0 8px; font-size: 12px; }
+    .chunk-text { margin: 0; white-space: pre-wrap; line-height: 1.55; font-size: 14px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 620px) { main { padding: 18px 12px 40px; } .paper-row { align-items: flex-start; flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back" href="/">← Back to workspace</a>
+    <h1>Local papers</h1>
+    <p class="intro">PDF files in the configured data/papers directory.</p>
+    <section class="panel" aria-label="Local PDF list">
+      <div id="paperStatus" class="status" role="status">Loading local papers...</div>
+      <div id="paperList" class="paper-list"></div>
+    </section>
+    <section id="evidencePanel" class="panel" hidden>
+      <h2 id="paperTitle"></h2>
+      <p id="paperMeta" class="meta"></p>
+      <h3>Section overview</h3>
+      <div id="sectionOverview" class="overview"></div>
+      <h3>Evidence chunks</h3>
+      <div id="chunkGroups"></div>
+    </section>
+  </main>
+  <script>
+    const SECTION_LABELS = {
+      abstract: 'Abstract', introduction: 'Introduction', related_work: 'Related Work',
+      background: 'Background', methods: 'Methods', experiments: 'Experiments',
+      results: 'Results', discussion: 'Discussion', conclusion: 'Conclusion', unknown: 'Unknown'
+    };
+    const $ = (id) => document.getElementById(id);
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[char]));
+    }
+    function sectionLabel(section) {
+      return SECTION_LABELS[section] || section.replaceAll('_', ' ');
+    }
+    async function requestJson(url) {
+      const response = await fetch(url);
+      let data = {};
+      try { data = await response.json(); } catch (_) {}
+      if (!response.ok) throw new Error(data.detail || 'Request failed.');
+      return data;
+    }
+    async function loadPapers() {
+      const status = $('paperStatus');
+      try {
+        const papers = await requestJson('/api/local/papers');
+        if (!papers.length) {
+          status.textContent = 'No PDF files found in data/papers.';
+          return;
+        }
+        status.textContent = '';
+        $('paperList').innerHTML = papers.map((paper) => `
+          <article class="paper-row">
+            <div><div class="paper-name">${escapeHtml(paper.filename)}</div>
+              <div class="meta">${escapeHtml(String(paper.size_bytes))} bytes</div></div>
+            <button type="button" data-filename="${escapeHtml(paper.filename)}">View evidence</button>
+          </article>`).join('');
+      } catch (error) {
+        status.classList.add('error');
+        status.textContent = error.message || 'Could not load local papers.';
+      }
+    }
+    function renderEvidence(data) {
+      $('paperTitle').textContent = data.paper_title;
+      $('paperMeta').textContent = `${data.paper_id} · ${data.chunk_count} evidence chunks`;
+      $('sectionOverview').innerHTML = Object.entries(data.section_counts).map(([section, count]) =>
+        `<div class="count">${escapeHtml(sectionLabel(section))}<strong>${escapeHtml(count)}</strong></div>`
+      ).join('');
+      const groups = new Map();
+      for (const chunk of data.chunks) {
+        if (!groups.has(chunk.section)) groups.set(chunk.section, []);
+        groups.get(chunk.section).push(chunk);
+      }
+      $('chunkGroups').innerHTML = Array.from(groups.entries()).map(([section, chunks], index) => `
+        <details class="section"${index === 0 ? ' open' : ''}>
+          <summary>${escapeHtml(sectionLabel(section))} · ${chunks.length}</summary>
+          <div class="chunks">${chunks.map((chunk) => `
+            <article class="chunk">
+              <h4 class="chunk-label">[${escapeHtml(sectionLabel(chunk.section))}]</h4>
+              <p class="meta">${chunk.page ? `${escapeHtml('PDF page:')} ${escapeHtml(chunk.page)}` : escapeHtml('Location unavailable')}${chunk.section_heading ? ` · ${escapeHtml('Section:')} ${escapeHtml(chunk.section_heading)}` : ''}</p>
+              <p class="chunk-text">${escapeHtml(chunk.text)}</p>
+            </article>`).join('')}
+          </div>
+        </details>`).join('');
+      $('evidencePanel').hidden = false;
+      $('evidencePanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    $('paperList').addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-filename]');
+      if (!button) return;
+      const status = $('paperStatus');
+      button.disabled = true;
+      status.classList.remove('error');
+      status.textContent = 'Loading evidence...';
+      try {
+        const filename = button.dataset.filename;
+        const data = await requestJson(`/api/local/papers/${encodeURIComponent(filename)}/evidence`);
+        renderEvidence(data);
+        status.textContent = '';
+      } catch (error) {
+        status.classList.add('error');
+        status.textContent = error.message || 'Could not load evidence.';
+      } finally {
+        button.disabled = false;
+      }
+    });
+    loadPapers();
+  </script>
+</body>
+</html>"""
+
+
+def get_local_papers_html(language: str | None = None) -> str:
+    return localize_ui_html(LOCAL_PAPERS_TEMPLATE, language=language)
