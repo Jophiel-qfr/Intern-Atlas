@@ -83,6 +83,8 @@ class Settings:
     llm_models: tuple[str, ...]
     llm_timeout_seconds: float
     llm_thinking_mode: str | None
+    llm_reasoning_effort: str | None
+    llm_json_mode: bool
     remote_base_url: str
     remote_api_key: str
     semantic_scholar_base_url: str
@@ -133,6 +135,8 @@ def get_settings(start: str | Path | None = None) -> Settings:
         llm_models=models,
         llm_timeout_seconds=_positive_float_env("LLM_TIMEOUT_SECONDS", default=120.0),
         llm_thinking_mode=_llm_thinking_mode_env(),
+        llm_reasoning_effort=_llm_reasoning_effort_env(),
+        llm_json_mode=_llm_json_mode_env(),
         remote_base_url=_first_env("INTERN_ATLAS_REMOTE_BASE_URL", default=DEFAULT_REMOTE_BASE_URL),
         remote_api_key=_first_env("INTERN_ATLAS_API_KEY", "INTERN_ATLAS_REMOTE_API_KEY"),
         semantic_scholar_base_url=_first_env(
@@ -163,6 +167,26 @@ def _llm_thinking_mode_env() -> str | None:
             "Invalid LLM_THINKING_MODE; expected 'disabled', 'enabled', or an empty value."
         )
     return value or None
+
+
+def _llm_reasoning_effort_env() -> str | None:
+    value = os.environ.get("LLM_REASONING_EFFORT", "").strip().lower()
+    if value not in {"", "none", "low", "high", "max"}:
+        raise ValueError(
+            "Invalid LLM_REASONING_EFFORT; expected 'none', 'low', 'high', 'max', or an empty value."
+        )
+    return value or None
+
+
+def _llm_json_mode_env() -> bool:
+    value = os.environ.get("LLM_JSON_MODE", "").strip().lower()
+    if value in {"", "false", "0"}:
+        return False
+    if value in {"true", "1"}:
+        return True
+    raise ValueError(
+        "Invalid LLM_JSON_MODE; expected 'true', '1', 'false', '0', or an empty value."
+    )
 
 
 def _positive_int_env(name: str, *, default: int) -> int:

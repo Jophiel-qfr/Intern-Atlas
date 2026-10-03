@@ -100,6 +100,31 @@ def _completion(content: str, finish_reason=None):
     return {"choices": [{"finish_reason": finish_reason, "message": {"content": content}}]}
 
 
+def _mock_lineage_request_payload():
+    captured_payloads = []
+
+    def handler(request):
+        captured_payloads.append(json.loads(request.content))
+        return _http_json(
+            _completion(json.dumps(_response()), finish_reason="stop")
+        )
+
+    client = OpenAICompatibleLineageClient(
+        base_url="https://mock.example/v1",
+        api_key="placeholder-key",
+        model="mock-model",
+        transport=httpx.MockTransport(handler),
+        sleep_fn=lambda delay: None,
+    )
+    try:
+        parsed = client.analyze(_context(), max_tokens=4000)
+        assert parsed.analysis_status == "confirmed"
+    finally:
+        client.close()
+    assert len(captured_payloads) == 1
+    return captured_payloads[0]
+
+
 def test_lineage_prompt_lists_only_allowed_analysis_statuses() -> None:
     prompt = build_lineage_system_prompt()
 
@@ -120,6 +145,54 @@ def test_lineage_prompt_forbids_invented_status_values_and_requests_concise_outp
     assert "Return concise JSON only" in prompt
     assert "Keep claim text short and evidence-grounded" in prompt
     assert "Do not spend output tokens restating supplied evidence" in prompt
+
+
+def test_lineage_prompt_sets_output_array_and_text_limits() -> None:
+    prompt = build_lineage_system_prompt()
+
+    for field, limit in (
+        ("inherited_components", 4),
+        ("changed_components", 4),
+        ("added_components", 4),
+        ("removed_components", 3),
+        ("experimental_evidence", 3),
+        ("limitations", 3),
+        ("method_changes", 8),
+    ):
+        assert f"- {field}: max {limit} entries." in prompt
+    assert "uncertainty: max 30 English words" in prompt
+    assert "Each EvidenceBackedClaim.text: max 20 English words" in prompt
+    assert "method_changes[].component: a short component name" in prompt
+    assert "from_value and to_value: core technology names or short phrases only" in prompt
+    assert "method_changes[].description: max 25 English words" in prompt
+    assert "maximums, not quotas" in prompt
+
+
+def test_lineage_prompt_removes_verbose_repetition_and_unnecessary_evidence_ids() -> None:
+    prompt = build_lineage_system_prompt()
+
+    assert "Do not quote, copy, or restate evidence text" in prompt
+    assert "Do not explain reasoning or retell paper background" in prompt
+    assert "Do not write Markdown" in prompt
+    assert "Do not repeat the same sentence across multiple fields" in prompt
+    assert "Merge semantically duplicate method_changes into one change" in prompt
+    assert "unsupported by direct evidence, use [] or null" in prompt
+    assert "experimental conclusions directly relevant to comparing the methods" in prompt
+    assert "minimum necessary evidence ID set" in prompt
+    assert "Retain evidence from both source and target" in prompt
+
+
+def test_compact_prompt_example_preserves_the_existing_response_schema() -> None:
+    prompt = build_lineage_system_prompt()
+    example_text = prompt.split("Return only one JSON object with exactly these fields:\n", 1)[1]
+    example, _ = json.JSONDecoder().raw_decode(example_text)
+    parsed = parse_lineage_llm_response(json.dumps(example), _context())
+
+    assert set(example) == set(_response())
+    assert parsed.analysis_status == "insufficient_evidence"
+    assert parsed.relation_type is None
+    assert parsed.method_changes == []
+    assert "Keep every top-level field even when empty" in prompt
 
 
 def test_valid_confirmed_response_rebuilds_evidence_from_context() -> None:
@@ -395,6 +468,81 @@ def test_thinking_mode_is_only_sent_when_configured(monkeypatch, mode, expected)
         client.close()
 
 
+@pytest.mark.parametrize("effort", [None, "", "none", "low", "high", "max"])
+def test_reasoning_effort_is_only_sent_when_configured(monkeypatch, effort) -> None:
+    monkeypatch.setenv("LLM_THINKING_MODE", "")
+    monkeypatch.setenv("LLM_JSON_MODE", "")
+    if effort is None:
+        monkeypatch.delenv("LLM_REASONING_EFFORT", raising=False)
+    else:
+        monkeypatch.setenv("LLM_REASONING_EFFORT", effort)
+
+    settings = get_settings()
+    payload = _mock_lineage_request_payload()
+
+    assert settings.llm_reasoning_effort == (effort or None)
+    if effort:
+        assert payload["reasoning_effort"] == effort
+    else:
+        assert "reasoning_effort" not in payload
+
+
+@pytest.mark.parametrize(
+    ("mode", "enabled"),
+    [(None, False), ("", False), ("false", False), ("0", False), ("true", True), ("1", True)],
+)
+def test_json_mode_only_sends_response_format_when_enabled(monkeypatch, mode, enabled) -> None:
+    monkeypatch.setenv("LLM_THINKING_MODE", "")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "")
+    if mode is None:
+        monkeypatch.delenv("LLM_JSON_MODE", raising=False)
+    else:
+        monkeypatch.setenv("LLM_JSON_MODE", mode)
+
+    settings = get_settings()
+    payload = _mock_lineage_request_payload()
+
+    assert settings.llm_json_mode is enabled
+    if enabled:
+        assert payload["response_format"] == {"type": "json_object"}
+    else:
+        assert "response_format" not in payload
+
+
+def test_thinking_reasoning_and_json_mode_are_sent_together_without_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_THINKING_MODE", "disabled")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "none")
+    monkeypatch.setenv("LLM_JSON_MODE", "true")
+
+    payload = _mock_lineage_request_payload()
+
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["reasoning_effort"] == "none"
+    assert payload["response_format"] == {"type": "json_object"}
+    assert payload["max_tokens"] == 4000
+    assert payload["model"] == "mock-model"
+    assert "method_changes: max 8 entries" in payload["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("name", ["LLM_REASONING_EFFORT", "LLM_JSON_MODE"])
+def test_invalid_optional_llm_settings_raise_safe_configuration_errors(monkeypatch, name) -> None:
+    monkeypatch.setenv("LLM_THINKING_MODE", "")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "")
+    monkeypatch.setenv("LLM_JSON_MODE", "")
+    invalid_value = "private-invalid-configuration"
+    monkeypatch.setenv(name, invalid_value)
+
+    with pytest.raises(LineageLLMConfigurationError, match=name) as error:
+        OpenAICompatibleLineageClient(
+            api_key="placeholder-key",
+            transport=httpx.MockTransport(
+                lambda request: pytest.fail("Invalid settings must not make an HTTP request.")
+            ),
+        )
+    assert invalid_value not in str(error.value)
+    assert "placeholder-key" not in str(error.value)
+
+
 def test_invalid_thinking_mode_is_a_clear_configuration_error(monkeypatch) -> None:
     monkeypatch.setenv("LLM_THINKING_MODE", "automatic")
 
@@ -512,19 +660,27 @@ def test_finish_reason_length_raises_safe_truncation_error() -> None:
 
 
 def test_finish_reason_stop_keeps_valid_response_flow() -> None:
+    captured_payloads = []
+
+    def handler(request):
+        captured_payloads.append(json.loads(request.content))
+        return _http_json(
+            _completion(json.dumps(_response()), finish_reason="stop")
+        )
+
     client = OpenAICompatibleLineageClient(
         api_key="placeholder-key",
-        transport=httpx.MockTransport(
-            lambda request: _http_json(
-                _completion(json.dumps(_response()), finish_reason="stop")
-            )
-        ),
+        transport=httpx.MockTransport(handler),
         sleep_fn=lambda delay: None,
     )
     try:
         parsed = client.analyze(_context())
         assert parsed.analysis_status == "confirmed"
         assert parsed.relation_type == "improves"
+        assert captured_payloads[0]["max_tokens"] == 4000
+        system_prompt = captured_payloads[0]["messages"][0]["content"]
+        assert "method_changes: max 8 entries" in system_prompt
+        assert "Aim for at most 1800 output tokens" in system_prompt
     finally:
         client.close()
 

@@ -59,7 +59,27 @@ Do not use any other status value, including "sufficient_evidence", "likely", "s
 
 Every conclusion must cite one or more evidence_id values that appear in the supplied context. Never invent IDs. Do not return evidence quotes or other evidence text; return IDs only. Do not force a relation.
 
-Return concise JSON only. Keep claim text short and evidence-grounded. Do not repeat the same conclusion across multiple fields unless necessary. If there is no experimental result comparing source and target, use "experimental_evidence": []. If a field is unsupported, use [] or null rather than explaining why. Do not spend output tokens restating supplied evidence.
+Return concise JSON only. Keep claim text short and evidence-grounded. Aim for at most 1800 output tokens and always finish the complete JSON object. These limits are maximums, not quotas: prefer fewer entries and retain only the most important distinct supported findings. Do not spend output tokens restating supplied evidence.
+
+Output array limits:
+- inherited_components: max 4 entries.
+- changed_components: max 4 entries.
+- added_components: max 4 entries.
+- removed_components: max 3 entries.
+- experimental_evidence: max 3 entries.
+- limitations: max 3 entries.
+- method_changes: max 8 entries.
+
+Text limits (write analysis text in concise English, preserving technical names):
+- uncertainty: max 30 English words, or null.
+- Each EvidenceBackedClaim.text: max 20 English words, including problem_addressed and claimed_contribution.
+- method_changes[].component: a short component name, normally 1-4 words.
+- method_changes[].from_value and to_value: core technology names or short phrases only, normally 1-6 words, or null.
+- method_changes[].description: max 25 English words.
+
+Do not quote, copy, or restate evidence text. Do not explain reasoning or retell paper background. Do not write Markdown. Do not repeat the same sentence across multiple fields. Merge semantically duplicate method_changes into one change rather than describing the same change repeatedly.
+If a field is unsupported by direct evidence, use [] or null as appropriate for its existing type; omit unsupported claim/change entries instead of explaining why they are unsupported. experimental_evidence must contain only experimental conclusions directly relevant to comparing the methods, not general dataset or performance descriptions. If there is no experimental result comparing source and target, use "experimental_evidence": [].
+For every evidence_ids list and relation_evidence_ids, use the minimum necessary evidence ID set, normally one or two IDs. Retain evidence from both source and target when needed for a comparison. Do not attach all available or merely related IDs.
 
 Preserve paper titles, model names, dataset names, and technical names as written in the evidence. Use the following distinctions for method_changes:
 - inherited: the target retains a component from the source method.
@@ -83,7 +103,7 @@ Return only one JSON object with exactly these fields:
   "confidence": 0.0,
   "uncertainty": null,
   "relation_evidence_ids": [],
-  "inherited_components": [{"text": "...", "evidence_ids": ["S001"]}],
+  "inherited_components": [],
   "changed_components": [],
   "added_components": [],
   "removed_components": [],
@@ -91,10 +111,10 @@ Return only one JSON object with exactly these fields:
   "claimed_contribution": null,
   "experimental_evidence": [],
   "limitations": [],
-  "method_changes": [{"component": "...", "change_type": "replaced", "from_value": "...", "to_value": "...", "description": "...", "evidence_ids": ["S001", "T001"], "confidence": null}]
+  "method_changes": []
 }
 
-Use only the allowed status and relation values listed above; the object shows the insufficient-evidence form. Each non-null claim object must have exactly "text" and "evidence_ids". Each method change must have exactly the fields shown and a change_type from inherited, modified, replaced, added, or removed. Use empty arrays and null for unsupported claims. Do not return Markdown or a fenced code block."""
+Use only the allowed status and relation values listed above; the object shows the insufficient-evidence form. Keep every top-level field even when empty. Each non-null claim object must have exactly "text" and "evidence_ids", for example {"text": "Short supported claim", "evidence_ids": ["T001"]}. Each method change must have exactly these fields: {"component": "temporal_modeling", "change_type": "replaced", "from_value": "LSTM", "to_value": "BiLSTM", "description": "Short supported change", "evidence_ids": ["S001", "T001"], "confidence": null}. change_type must be inherited, modified, replaced, added, or removed. Use empty arrays and null for unsupported claims. Do not return Markdown or a fenced code block."""
 
 
 def format_lineage_context(context: LineageLLMContext) -> str:
@@ -161,6 +181,8 @@ class OpenAICompatibleLineageClient:
         self.api_key = api_key if api_key is not None else settings.llm_api_key
         self.model = model or settings.llm_models[0]
         self.thinking_mode = settings.llm_thinking_mode
+        self.reasoning_effort = settings.llm_reasoning_effort
+        self.json_mode = settings.llm_json_mode
         self.timeout_seconds = (
             settings.llm_timeout_seconds if timeout_seconds is None else timeout_seconds
         )
@@ -199,6 +221,10 @@ class OpenAICompatibleLineageClient:
         }
         if self.thinking_mode is not None:
             payload["thinking"] = {"type": self.thinking_mode}
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
+        if self.json_mode:
+            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
