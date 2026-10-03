@@ -24,5 +24,6 @@ Not currently supported:
 
 - Automatic full-text download or source retrieval.
 - OCR for scanned PDFs.
-- LLM analysis or method-lineage judgments.
+- LLM analysis or method-lineage judgments within this input module; the separate
+  application analysis layer is described in [LLM_LINEAGE_ANALYSIS.md](LLM_LINEAGE_ANALYSIS.md).
 - Embeddings or a vector database.

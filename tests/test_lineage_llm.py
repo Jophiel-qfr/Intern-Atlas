@@ -623,6 +623,9 @@ def test_http_retry_is_bounded_to_two_retries() -> None:
     "payload",
     [
         {"choices": []},
+        {"choices": [None]},
+        {"choices": [[]]},
+        {"choices": ["invalid choice"]},
         {"choices": [{"message": {}}]},
         {"choices": [{"message": {"content": None}}]},
         {"broken": True},

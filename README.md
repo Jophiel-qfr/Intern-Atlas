@@ -9,6 +9,13 @@ This repository is intentionally not the Intern Atlas website. It contains the
 reusable local builder, local API, and a small client for the hosted Intern Atlas
 API.
 
+## HAR Method Atlas
+
+HAR 用户入口：[本地论文](http://127.0.0.1:8000/local-papers)。可查看本地 PDF、免费预览论文 A → B 的证据，再选择是否调用 LLM 分析；成功结果支持历史查看及 JSON / Markdown 导出。
+
+- [中文使用指南](docs/HAR_METHOD_ATLAS_USER_GUIDE.md)：PDF 放置、启动、证据核验、费用和常见问题。
+- [当前开发状态](docs/HAR_METHOD_ATLAS_STATUS.md)：实际功能、限制和下一阶段可选项。
+
 ## For Online API
 
 The API document is here: https://jcnc4nyy2d5p.feishu.cn/wiki/EL1sw9XqAizaCYkGoxpcPAoNnKc

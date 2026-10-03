@@ -274,6 +274,8 @@ class OpenAICompatibleLineageClient:
             if not isinstance(choices, list) or not choices:
                 raise TypeError
             choice = choices[0]
+            if not isinstance(choice, dict):
+                raise TypeError
             finish_reason = choice.get("finish_reason")
             if finish_reason == "length":
                 raise LineageLLMTruncatedResponseError(

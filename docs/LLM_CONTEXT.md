@@ -10,8 +10,9 @@ The evidence pipeline keeps three stages distinct:
 
 `build_lineage_llm_context` deterministically selects evidence for both papers.
 It first tries to cover overview text (abstract/introduction/related work),
-methods, and experiments/results for each paper, then fills remaining budgets
-by score. The default maximum is 28,000 characters total, 14,000 per paper, and
+methods, and experiments/results for each paper, reserves up to six pairs of
+lexically comparable source/target method or experiment paragraphs within the
+same budgets, then fills remaining budgets by score. The default maximum is 28,000 characters total, 14,000 per paper, and
 20 chunks per paper. Output is ordered by source then target and by each
 package's document order. IDs such as `S001` and `T001` are stable for the same
 input and policy and can be resolved with `get_evidence` or validated with
@@ -22,7 +23,9 @@ They describe selection priority only; lexical overlap does not establish a
 method relationship, and citation-context priority does not confirm method
 inheritance. The context contains no relation type or method changes.
 
-There is currently no LLM call, API call, method-relationship judgment, token
-counting, embedding, or vector database. Character limits are a lightweight
+This context-selection module makes no LLM/API calls or method-relationship
+judgments, and performs no token counting, embedding, or vector storage. The
+application's separate online analysis layer is documented in
+[LLM_LINEAGE_ANALYSIS.md](LLM_LINEAGE_ANALYSIS.md). Character limits are a lightweight
 proxy for context size, and section coverage depends on available chunks and
 the configured budgets.

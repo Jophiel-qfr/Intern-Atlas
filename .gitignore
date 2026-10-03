@@ -17,12 +17,14 @@ dist/
 *.db-*
 *.sqlite
 *.sqlite3
+*.sqlite3-*
 *.sqlite-*
 *.jsonl
 
 outputs/
 data/
 papers/
+analyses/
 cache/
 logs/
 
