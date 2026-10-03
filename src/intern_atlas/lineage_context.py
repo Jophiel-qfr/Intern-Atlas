@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any, ClassVar, Mapping, Sequence
+from unicodedata import normalize
 
 from .discovery import (
     GENERIC_OVERLAP_TERMS,
@@ -45,6 +46,49 @@ OVERVIEW_SECTIONS = frozenset({"abstract", "introduction", "related_work", "back
 METHOD_SECTIONS = frozenset({"methods"})
 EXPERIMENT_SECTIONS = frozenset({"experiments", "results"})
 _EVIDENCE_ID_RE = re.compile(r"^[ST]\d{3,}$")
+
+# Retrieval cues only: these do not assert that a component was inherited or changed.
+_MAX_CROSS_PAPER_PAIRS = 6
+_MIN_CROSS_PAPER_SCORE = 5.0
+_COMPARISON_STOP_TERMS = GENERIC_OVERLAP_TERMS | HAR_DOMAIN_TOKENS | {
+    "human", "activity", "activities", "recognition", "sensor", "sensors", "har",
+    "wearables", "this", "that", "these", "those", "from", "into", "are", "was",
+    "were", "has", "have", "had", "can", "could", "will", "would", "should",
+    "may", "not", "also", "which", "such", "than", "then", "each", "all",
+    "our", "their", "other", "use", "uses", "used", "both", "only", "two",
+    "one", "first", "last", "approach", "approaches", "method", "methods",
+    "architecture", "architectures", "layer", "layers", "feature", "features",
+    "representation", "representations", "input", "output", "time", "step", "steps",
+    "after", "before", "best", "better", "impact", "results", "result", "evaluation",
+    "evaluate", "evaluated", "experiment", "experiments", "experimental", "proposed",
+    "present", "presented", "paper", "study", "studies", "more", "most", "same",
+    "different", "similar", "between", "through", "new", "system", "systems",
+    "performance", "framework", "frameworks", "task", "tasks", "application",
+    "applications", "however", "while", "during", "when", "where", "over", "under",
+    "without", "there", "therefore", "thus", "every", "any", "some",
+}
+_COMPONENT_PHRASES = {
+    "hidden state": ("hidden state", "hidden states"),
+    "softmax": ("softmax",),
+    "classifier": ("classifier", "classifiers", "classification layer"),
+    "embedding": ("embedding", "embeddings"),
+    "feature map": ("feature map", "feature maps", "features maps"),
+    "convolutional layer": ("convolutional layer", "convolutional layers", "convolution layers"),
+    "recurrent layer": ("recurrent layer", "recurrent layers", "recurrent dense layers"),
+    "lstm layer": ("lstm layer", "lstm layers"),
+    "output layer": ("output layer", "output layers"),
+    "pooling": ("pooling",),
+    "fusion": ("fusion",),
+    "attention layer": ("attention layer", "attention layers"),
+    "temporal representation": ("temporal representation", "temporal representations"),
+    "feature representation": ("feature representation", "feature representations"),
+    "last time step": ("last time step", "last time steps"),
+    "model output": ("model output", "output of the model", "class probability distribution"),
+}
+_OUTPUT_COMPONENTS = frozenset({
+    "hidden state", "embedding", "output layer", "temporal representation",
+    "feature representation", "last time step", "model output",
+})
 
 
 @dataclass(frozen=True)
@@ -307,59 +351,198 @@ def _coverage_group(chunk: PaperEvidenceChunk) -> str | None:
     return None
 
 
-def _select_for_paper(
+@dataclass(frozen=True)
+class _ComparisonSignals:
+    methods: frozenset[str]
+    components: frozenset[str]
+    tokens: frozenset[str]
+    named_terms: frozenset[str]
+    eligible: bool
+
+
+def _comparison_signals(chunk: PaperEvidenceChunk) -> _ComparisonSignals:
+    # Normalize extraction ligatures for matching only; evidence text is unchanged.
+    text = normalize("NFKC", chunk.text)
+    normalized = " " + normalized_text(text) + " "
+    components = frozenset(
+        cue for cue, aliases in _COMPONENT_PHRASES.items()
+        if any(" " + alias + " " in normalized for alias in aliases)
+    )
+    words = token_set(text)
+    tokens = words - _COMPARISON_STOP_TERMS
+    methods = set(method_signals_in_text(text)) | (components & {"pooling", "fusion"})
+    # Mixed-case identifiers such as named architectures can be extra retrieval cues.
+    # Do not assume a mention of a named method proves any relationship.
+    names = frozenset(
+        word.lower() for word in re.findall(r"\b[A-Za-z][A-Za-z0-9]{3,}\b", text)
+        if any(char.isupper() for char in word[1:])
+        and any(char.islower() for char in word)
+        and word.lower() not in _COMPARISON_STOP_TERMS
+    )
+    eligible = (
+        chunk.section in METHOD_SECTIONS | EXPERIMENT_SECTIONS
+        and len(words) >= 4
+        and (chunk.section in METHOD_SECTIONS or bool(components))
+    )
+    return _ComparisonSignals(frozenset(methods), components, frozenset(tokens), names, eligible)
+
+
+def _score_cross_paper_pair(
+    source_chunk: PaperEvidenceChunk,
+    target_chunk: PaperEvidenceChunk,
+    *,
+    source_signals: _ComparisonSignals | None = None,
+    target_signals: _ComparisonSignals | None = None,
+) -> tuple[float, list[str]]:
+    """Score comparable component descriptions, never a method relationship."""
+
+    source_signals = source_signals or _comparison_signals(source_chunk)
+    target_signals = target_signals or _comparison_signals(target_chunk)
+    # Exclude table labels and generic evaluation text without architecture cues.
+    if not source_signals.eligible or not target_signals.eligible:
+        return 0.0, []
+
+    methods = source_signals.methods & target_signals.methods
+    components = source_signals.components & target_signals.components
+    lexical = source_signals.tokens & target_signals.tokens
+    named = source_signals.named_terms & target_signals.tokens
+    output_comparison = bool(
+        source_signals.components & _OUTPUT_COMPONENTS
+        and target_signals.components & _OUTPUT_COMPONENTS
+        and not components & _OUTPUT_COMPONENTS
+    )
+    if not methods and not components and not output_comparison and len(lexical) < 3:
+        return 0.0, []
+
+    cues = set(methods) | set(components)
+    score = 3.0 * min(3, len(methods)) + 4.0 * min(3, len(components))
+    if output_comparison:
+        score += 3.0
+        cues.add("output/representation")
+    if len(lexical) >= 2:
+        score += 0.75 * min(4, len(lexical))
+        if not cues:
+            cues.update(sorted(lexical)[:4])
+    if named:
+        score += 1.5
+        cues.update(named)
+    # Methods are preferred, but experiments can contain essential output details.
+    score += sum(chunk.section in METHOD_SECTIONS for chunk in (source_chunk, target_chunk))
+    return round(score, 3), sorted(cues)
+
+
+_RankedChunk = tuple[int, PaperEvidenceChunk, float, list[str]]
+
+
+@dataclass
+class _PaperSelection:
+    ranked: list[_RankedChunk]
+    char_budget: int
+    max_chunks: int
+    chosen: dict[int, _RankedChunk] = field(default_factory=dict)
+    used_chars: int = 0
+
+    def can_include(self, candidate: _RankedChunk) -> bool:
+        index, chunk, _, _ = candidate
+        return index in self.chosen or (
+            len(self.chosen) < self.max_chunks
+            and self.used_chars + len(chunk.text) <= self.char_budget
+        )
+
+    def include(self, candidate: _RankedChunk) -> None:
+        if candidate[0] not in self.chosen:
+            self.chosen[candidate[0]] = candidate
+            self.used_chars += len(candidate[1].text)
+
+    def reserve_coverage(self) -> None:
+        for group in ("overview", "method", "evidence"):
+            for candidate in self.ranked:
+                if _coverage_group(candidate[1]) == group and self.can_include(candidate):
+                    self.include(candidate)
+                    break
+
+    def mark_comparison(self, candidate: _RankedChunk, score: float, cues: list[str]) -> None:
+        self.include(candidate)
+        index, chunk, base_score, reasons = candidate
+        self.chosen[index] = (
+            index, chunk, round(base_score + score, 3),
+            reasons + ["Cross-paper comparison cue: " + ", ".join(cues)],
+        )
+
+    def fill(self) -> None:
+        for candidate in self.ranked:
+            if self.can_include(candidate):
+                self.include(candidate)
+
+    def ordered(self) -> list[_RankedChunk]:
+        return [self.chosen[index] for index in sorted(self.chosen)]
+
+
+def _rank_for_paper(
     package: PaperEvidencePackage,
     role: str,
     other: PaperEvidencePackage,
     role_char_budget: int,
     max_chunks: int,
-) -> tuple[list[tuple[int, PaperEvidenceChunk, float, list[str]]], str | None]:
+) -> _PaperSelection:
     ranked = []
-    for document_index, chunk in enumerate(package.chunks):
-        score, reasons = _score_chunk(chunk, role, package if role == "source" else other,
-                                      other if role == "source" else package)
-        ranked.append((document_index, chunk, score, reasons))
-    ranked.sort(key=lambda item: (-item[2], item[0]))
-
-    chosen: list[tuple[int, PaperEvidenceChunk, float, list[str]]] = []
-    chosen_indices: set[int] = set()
-    used_chars = 0
-
-    # First reserve a representative chunk for overview, method, and empirical
-    # evidence when the package and its independent budget make that possible.
-    for group in ("overview", "method", "evidence"):
-        if len(chosen) >= max_chunks:
-            break
-        if any(_coverage_group(item[1]) == group for item in chosen):
-            continue
-        for candidate in ranked:
-            index, chunk, _, _ = candidate
-            if index in chosen_indices or _coverage_group(chunk) != group:
-                continue
-            if used_chars + len(chunk.text) <= role_char_budget:
-                chosen.append(candidate)
-                chosen_indices.add(index)
-                used_chars += len(chunk.text)
-                break
-
-    for candidate in ranked:
-        index, chunk, _, _ = candidate
-        if index in chosen_indices or len(chosen) >= max_chunks:
-            continue
-        if used_chars + len(chunk.text) > role_char_budget:
-            continue
-        chosen.append(candidate)
-        chosen_indices.add(index)
-        used_chars += len(chunk.text)
-
-    warning = None
-    skipped = len(package.chunks) - len(chosen)
-    if skipped:
-        warning = (
-            f"{role}: skipped {skipped} chunk(s) because of the per-paper/total "
-            "character budget or per-paper chunk limit."
+    for index, chunk in enumerate(package.chunks):
+        score, reasons = _score_chunk(
+            chunk, role, package if role == "source" else other,
+            other if role == "source" else package,
         )
-    return sorted(chosen, key=lambda item: item[0]), warning
+        ranked.append((index, chunk, score, reasons))
+    ranked.sort(key=lambda item: (-item[2], item[0]))
+    return _PaperSelection(ranked, role_char_budget, max_chunks)
+
+
+def _reserve_cross_paper_pairs(
+    source: _PaperSelection, target: _PaperSelection,
+) -> list[tuple[int, int, float, list[str]]]:
+    candidates = []
+    # Precompute signals once per chunk rather than tokenize inside every pair.
+    source_signals = {item[0]: _comparison_signals(item[1]) for item in source.ranked}
+    target_signals = {item[0]: _comparison_signals(item[1]) for item in target.ranked}
+    source_candidates = [
+        item for item in source.ranked
+        if source_signals[item[0]].eligible and source.can_include(item)
+    ]
+    target_candidates = [
+        item for item in target.ranked
+        if target_signals[item[0]].eligible and target.can_include(item)
+    ]
+    for source_item in source_candidates:
+        for target_item in target_candidates:
+            score, cues = _score_cross_paper_pair(
+                source_item[1], target_item[1],
+                source_signals=source_signals[source_item[0]],
+                target_signals=target_signals[target_item[0]],
+            )
+            if score >= _MIN_CROSS_PAPER_SCORE:
+                candidates.append((score, source_item, target_item, cues))
+    candidates.sort(key=lambda item: (-item[0], item[1][0], item[2][0]))
+
+    pairs = []
+    used_source: set[int] = set()
+    used_target: set[int] = set()
+    signatures: list[set[str]] = []
+    for score, source_item, target_item, cues in candidates:
+        if len(pairs) >= _MAX_CROSS_PAPER_PAIRS:
+            break
+        if source_item[0] in used_source or target_item[0] in used_target:
+            continue
+        signature = set(cues)
+        if any(len(signature & prior) / len(signature | prior) >= 0.75 for prior in signatures):
+            continue
+        if not source.can_include(source_item) or not target.can_include(target_item):
+            continue  # Reserve both sides together, without evicting coverage chunks.
+        source.mark_comparison(source_item, score, cues)
+        target.mark_comparison(target_item, score, cues)
+        pairs.append((source_item[0], target_item[0], score, cues))
+        used_source.add(source_item[0])
+        used_target.add(target_item[0])
+        signatures.append(signature)
+    return pairs
 
 
 def build_lineage_llm_context(
@@ -375,23 +558,41 @@ def build_lineage_llm_context(
     # Reserve separate, equal ceilings so a large source paper cannot consume
     # the target paper's allowance. Odd total budgets leave at most one char unused.
     role_char_budget = min(policy.max_chars_per_paper, policy.max_total_chars // 2)
-    source_selected, source_warning = _select_for_paper(
+    source_selection = _rank_for_paper(
         source, "source", target, role_char_budget, policy.max_chunks_per_paper
     )
-    target_selected, target_warning = _select_for_paper(
+    target_selection = _rank_for_paper(
         target, "target", source, role_char_budget, policy.max_chunks_per_paper
     )
+    source_selection.reserve_coverage()
+    target_selection.reserve_coverage()
+    pairs = _reserve_cross_paper_pairs(source_selection, target_selection)
+    source_selection.fill()
+    target_selection.fill()
+    source_selected = source_selection.ordered()
+    target_selected = target_selection.ordered()
 
-    warnings = [warning for warning in (source_warning, target_warning) if warning]
+    warnings = []
+    for role, package, selection in (
+        ("source", source, source_selection), ("target", target, target_selection),
+    ):
+        skipped = len(package.chunks) - len(selection.chosen)
+        if skipped:
+            warnings.append(
+                f"{role}: skipped {skipped} chunk(s) because of the per-paper/total "
+                "character budget or per-paper chunk limit."
+            )
     if not source.chunks:
         warnings.append("source: no evidence chunks are available.")
     if not target.chunks:
         warnings.append("target: no evidence chunks are available.")
 
     selected: list[SelectedEvidenceChunk] = []
+    evidence_ids: dict[tuple[str, int], str] = {}
     for role, items in (("source", source_selected), ("target", target_selected)):
         prefix = "S" if role == "source" else "T"
-        for ordinal, (_, chunk, score, reasons) in enumerate(items, start=1):
+        for ordinal, (index, chunk, score, reasons) in enumerate(items, start=1):
+            evidence_ids[(role, index)] = f"{prefix}{ordinal:03d}"
             selected.append(
                 SelectedEvidenceChunk(
                     evidence_id=f"{prefix}{ordinal:03d}",
@@ -421,6 +622,17 @@ def build_lineage_llm_context(
             "effective_chars_per_paper": role_char_budget,
             "section_priorities": dict(SECTION_PRIORITIES),
             "lexical_scoring": "lightweight lexical cues only; not a relation judgment",
+            "cross_paper_pair_limit": _MAX_CROSS_PAPER_PAIRS,
+            "cross_paper_min_score": _MIN_CROSS_PAPER_SCORE,
+            "cross_paper_pairs": [
+                {
+                    "source_evidence_id": evidence_ids[("source", source_index)],
+                    "target_evidence_id": evidence_ids[("target", target_index)],
+                    "score": score,
+                    "cues": cues,
+                }
+                for source_index, target_index, score, cues in pairs
+            ],
         },
         total_characters=sum(len(item.text) for item in selected),
     )

@@ -11,6 +11,7 @@ from intern_atlas.lineage_context import (
     EvidenceSelectionPolicy,
     LineageLLMContext,
     build_lineage_llm_context,
+    _score_cross_paper_pair,
     validate_evidence_ids,
 )
 
@@ -295,3 +296,244 @@ def test_context_json_round_trip_preserves_ids_and_policy() -> None:
     )
 
     assert restored.to_dict() == original.to_dict()
+
+
+SOURCE_OUTPUT_TEXT = (
+    "The final LSTM hidden state at the last time step is passed to a softmax classifier."
+)
+TARGET_OUTPUT_TEXT = (
+    "An attention-weighted embedding is constructed from LSTM hidden states before classification."
+)
+
+
+def _comparison_input() -> LineageEvidenceInput:
+    # Distractors outrank the output paragraphs under the previous independent scoring.
+    source = [
+        _chunk("source-1", "Source overview.", "introduction"),
+        _chunk("source-1", "Source evaluation results.", "results"),
+    ]
+    target = [
+        _chunk("target-1", "Target overview.", "abstract", chunk_type="abstract"),
+        _chunk("target-1", "Target experimental results.", "experiments"),
+    ]
+    for index in range(10):
+        source.append(_chunk(
+            "source-1", f"CNN transformer contrastive optimization variant {index}.",
+            "methods", page=index + 2,
+        ))
+        target.append(_chunk(
+            "target-1", f"GRU fusion pooling regularization variant {index}.",
+            "methods", page=index + 2,
+        ))
+    source.append(_chunk("source-1", SOURCE_OUTPUT_TEXT, "methods", page=12))
+    target.append(_chunk("target-1", TARGET_OUTPUT_TEXT, "methods", page=12))
+    return _input(source, target, source_title="Source study", target_title="Target study")
+
+
+def test_cross_paper_reservation_retains_comparable_output_despite_method_distractors() -> None:
+    context = build_lineage_llm_context(
+        _comparison_input(),
+        policy=EvidenceSelectionPolicy(max_chunks_per_paper=4),
+    )
+    assert SOURCE_OUTPUT_TEXT in {item.text for item in context.selected_evidence}
+    assert TARGET_OUTPUT_TEXT in {item.text for item in context.selected_evidence}
+    assert len(context.selection_policy["cross_paper_pairs"]) == 1
+    pair = context.selection_policy["cross_paper_pairs"][0]
+    assert context.get_evidence(pair["source_evidence_id"]).text == SOURCE_OUTPUT_TEXT
+    assert context.get_evidence(pair["target_evidence_id"]).text == TARGET_OUTPUT_TEXT
+    assert "hidden state" in pair["cues"]
+    for evidence_id in (pair["source_evidence_id"], pair["target_evidence_id"]):
+        assert any(
+            reason.startswith("Cross-paper comparison cue:")
+            for reason in context.get_evidence(evidence_id).selection_reasons
+        )
+
+
+def test_generic_har_overlap_does_not_create_comparison_boost() -> None:
+    source = _chunk(
+        "source-1", "Human activity recognition uses wearable sensor data.", "methods"
+    )
+    target = _chunk(
+        "target-1", "We evaluate human activity recognition using wearable sensor data.", "methods"
+    )
+    assert _score_cross_paper_pair(source, target) == (0.0, [])
+    context = build_lineage_llm_context(_input([source], [target]))
+    assert context.selection_policy["cross_paper_pairs"] == []
+    assert not any(
+        "Cross-paper" in reason
+        for item in context.selected_evidence for reason in item.selection_reasons
+    )
+
+
+def test_shared_lstm_is_a_comparison_cue_without_relation_judgment() -> None:
+    context = build_lineage_llm_context(_input(
+        [_chunk("source-1", "LSTM recurrent layers model temporal dynamics.", "methods")],
+        [_chunk("target-1", "Attention is applied over LSTM hidden states.", "methods")],
+    ))
+    assert len(context.selection_policy["cross_paper_pairs"]) == 1
+    assert "lstm" in context.selection_policy["cross_paper_pairs"][0]["cues"]
+    for item in context.selected_evidence:
+        reasons = " ".join(item.selection_reasons).lower()
+        assert "cross-paper comparison cue" in reasons
+        assert all(word not in reasons for word in ("inherited", "modified", "replaced"))
+    assert "relation_type" not in context.to_dict()
+    assert "method_changes" not in context.to_dict()
+
+
+def test_pair_reservation_preserves_overview_method_and_experimental_coverage() -> None:
+    context = build_lineage_llm_context(
+        _comparison_input(), policy=EvidenceSelectionPolicy(max_chunks_per_paper=4)
+    )
+    for role in ("source", "target"):
+        chunks = [item for item in context.selected_evidence if item.paper_role == role]
+        assert len(chunks) == 4
+        assert any(item.section in {"abstract", "introduction"} for item in chunks)
+        assert any(item.section == "methods" for item in chunks)
+        assert any(item.section in {"experiments", "results"} for item in chunks)
+
+
+def test_default_pair_selection_keeps_all_original_budgets() -> None:
+    evidence_input = _comparison_input()
+    for package in (evidence_input.source, evidence_input.target):
+        package.chunks.extend(
+            _chunk(package.paper_id, f"Additional method text {index}. " + "x" * 1500, "methods")
+            for index in range(30)
+        )
+    context = build_lineage_llm_context(evidence_input)
+    assert context.selection_policy["max_total_chars"] == 28000
+    assert context.selection_policy["max_chars_per_paper"] == 14000
+    assert context.selection_policy["max_chunks_per_paper"] == 20
+    for role in ("source", "target"):
+        chunks = [item for item in context.selected_evidence if item.paper_role == role]
+        assert len(chunks) <= 20
+        assert sum(len(item.text) for item in chunks) <= 14000
+    assert context.total_characters <= 28000
+    assert context.selection_policy["cross_paper_pairs"]
+
+
+def test_paired_selection_and_ids_are_deterministic_in_document_order() -> None:
+    evidence_input = _comparison_input()
+    policy = EvidenceSelectionPolicy(max_chunks_per_paper=4)
+    first = build_lineage_llm_context(evidence_input, policy=policy)
+    second = build_lineage_llm_context(evidence_input, policy=policy)
+    assert first.to_dict() == second.to_dict()
+    assert [item.evidence_id for item in first.selected_evidence] == [
+        "S001", "S002", "S003", "S004", "T001", "T002", "T003", "T004",
+    ]
+    for role, package in (("source", evidence_input.source), ("target", evidence_input.target)):
+        positions = [
+            next(index for index, chunk in enumerate(package.chunks) if chunk.text == item.text)
+            for item in first.selected_evidence if item.paper_role == role
+        ]
+        assert positions == sorted(positions)
+    restored = LineageLLMContext.from_mapping(json.loads(json.dumps(first.to_dict())))
+    assert restored.to_dict() == first.to_dict()
+
+
+def test_comparison_reservation_does_not_repeat_chunks_or_same_component_signature() -> None:
+    source = [
+        _chunk("source-1", f"LSTM hidden states encode temporal inputs in variant {index}.", "methods")
+        for index in range(12)
+    ]
+    target = [
+        _chunk("target-1", f"Attention weights LSTM hidden states for variant {index}.", "methods")
+        for index in range(12)
+    ]
+    context = build_lineage_llm_context(_input(source, target))
+    pairs = context.selection_policy["cross_paper_pairs"]
+    assert len(pairs) == 1
+    assert len({item.evidence_id for item in context.selected_evidence}) == len(context.selected_evidence)
+
+
+def test_architecture_comparison_in_experiments_is_eligible_but_generic_evaluation_is_not() -> None:
+    source = _chunk(
+        "source-1", "The LSTM outputs class probability distribution at the last time step.",
+        "experiments",
+    )
+    target = _chunk("target-1", TARGET_OUTPUT_TEXT, "methods")
+    score, cues = _score_cross_paper_pair(source, target)
+    assert score >= 5
+    assert "output/representation" in cues
+    generic = _chunk(
+        "source-1", "The LSTM is evaluated on wearable activity recognition datasets.", "experiments"
+    )
+    assert _score_cross_paper_pair(generic, target) == (0.0, [])
+    context = build_lineage_llm_context(_input([generic, source], [target]))
+    pair = context.selection_policy["cross_paper_pairs"][0]
+    assert context.get_evidence(pair["source_evidence_id"]).text == source.text
+
+
+def test_pair_is_not_reserved_when_one_side_exceeds_its_budget() -> None:
+    source = _chunk("source-1", SOURCE_OUTPUT_TEXT, "methods")
+    target = _chunk("target-1", TARGET_OUTPUT_TEXT + " x" * 100, "methods")
+    context = build_lineage_llm_context(
+        _input([source], [target]),
+        policy=EvidenceSelectionPolicy(max_total_chars=240, max_chars_per_paper=120),
+    )
+    assert context.selection_policy["cross_paper_pairs"] == []
+    assert [item.text for item in context.selected_evidence] == [SOURCE_OUTPUT_TEXT]
+    assert any("target: skipped" in warning for warning in context.warnings)
+    assert not any("Cross-paper" in reason for reason in context.selected_evidence[0].selection_reasons)
+
+
+def test_comparison_matches_pdf_ligatures_without_rewriting_evidence() -> None:
+    source = _chunk("source-1", "The softmax classi\ufb01er transforms the final embedding.", "methods")
+    target = _chunk("target-1", "The softmax classifier takes an attention embedding.", "methods")
+    score, cues = _score_cross_paper_pair(source, target)
+    assert score >= 5
+    assert {"softmax", "classifier", "embedding"} <= set(cues)
+    context = build_lineage_llm_context(_input([source], [target]))
+    assert context.get_evidence("S001").text == source.text
+
+
+def test_named_architecture_mention_is_only_an_extra_retrieval_cue() -> None:
+    source = _chunk(
+        "source-1", "TemporalNet computes LSTM hidden states for temporal classification.", "methods"
+    )
+    named_target = _chunk(
+        "target-1", "TemporalNet attention weights LSTM hidden states for classification.", "methods"
+    )
+    other_target = _chunk(
+        "target-1", "Attention weights LSTM hidden states for classification.", "methods"
+    )
+    named_score, named_cues = _score_cross_paper_pair(source, named_target)
+    ordinary_score, _ = _score_cross_paper_pair(source, other_target)
+    assert named_score > ordinary_score
+    assert "temporalnet" in named_cues
+
+
+@pytest.mark.parametrize("section", ["introduction", "abstract", "unknown"])
+def test_comparison_reservation_is_limited_to_component_sections(section: str) -> None:
+    source = _chunk("source-1", SOURCE_OUTPUT_TEXT, section)
+    target = _chunk("target-1", TARGET_OUTPUT_TEXT, "methods")
+    assert _score_cross_paper_pair(source, target) == (0.0, [])
+
+
+def test_methods_pair_has_priority_over_equivalent_experiment_pair() -> None:
+    source = _chunk("source-1", SOURCE_OUTPUT_TEXT, "methods")
+    experiment = _chunk("source-1", SOURCE_OUTPUT_TEXT, "experiments")
+    target = _chunk("target-1", TARGET_OUTPUT_TEXT, "methods")
+    method_score, _ = _score_cross_paper_pair(source, target)
+    experiment_score, _ = _score_cross_paper_pair(experiment, target)
+    assert method_score > experiment_score >= 5
+
+
+def test_comparison_slots_are_limited_and_cover_different_components() -> None:
+    components = [
+        "hidden states", "feature maps", "softmax classifier", "attention layers",
+        "pooling", "fusion", "embedding", "temporal representation",
+    ]
+    source = [
+        _chunk("source-1", f"The architecture computes {component} for sequence processing.", "methods")
+        for component in components
+    ]
+    target = [
+        _chunk("target-1", f"The approach computes {component} for sequence processing.", "methods")
+        for component in components
+    ]
+    context = build_lineage_llm_context(_input(source, target))
+    pairs = context.selection_policy["cross_paper_pairs"]
+    assert len(pairs) == 6
+    assert len({pair["source_evidence_id"] for pair in pairs}) == 6
+    assert len({pair["target_evidence_id"] for pair in pairs}) == 6
+    assert len({tuple(pair["cues"]) for pair in pairs}) == 6
