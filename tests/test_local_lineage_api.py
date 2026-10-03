@@ -201,6 +201,38 @@ def test_analyze_uses_mock_transport_and_builds_evidence_backed_lineage(
     }
     assert all(item["quote"] for item in payload["analysis"]["evidence"])
     assert "test-secret-that-must-not-return" not in response.text
+    saved = payload["saved_analysis"]
+    saved_path = papers_dir.parent / "analyses" / f"{saved['analysis_id']}.json"
+    assert saved_path.is_file()
+    record = json.loads(saved_path.read_text(encoding="utf-8"))
+    assert record["schema_version"] == 1 and record["analysis_id"] == saved["analysis_id"]
+    for name in ("analysis", "evidence_groups", "selected_evidence", "warnings"):
+        assert record[name] == payload[name]
+    assert "test-secret-that-must-not-return" not in saved_path.read_text(encoding="utf-8")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("history and exports must not construct LLM clients or parse PDFs")
+    monkeypatch.setattr(server_module, "OpenAICompatibleLineageClient", forbidden)
+    monkeypatch.setattr(server_module, "build_local_lineage_context", forbidden)
+    (papers_dir / "source.pdf").unlink()
+    (papers_dir / "target.pdf").unlink()
+    with TestClient(app) as client:
+        history = client.get("/api/local/lineage/history")
+        loaded = client.get(f"/api/local/lineage/history/{saved['analysis_id']}")
+        exported_json = client.get(f"/api/local/lineage/history/{saved['analysis_id']}/json")
+        exported_md = client.get(f"/api/local/lineage/history/{saved['analysis_id']}/markdown")
+    assert history.status_code == loaded.status_code == exported_json.status_code == exported_md.status_code == 200
+    assert [item["analysis_id"] for item in history.json()] == [saved["analysis_id"]]
+    assert "selected_evidence" not in history.json()[0]
+    assert loaded.json() == record == exported_json.json()
+    assert "text/markdown" in exported_md.headers["content-type"]
+    assert "charset=utf-8" in exported_md.headers["content-type"]
+    assert f"HAR_Method_Atlas_{saved['analysis_id']}.json" in exported_json.headers["content-disposition"]
+    assert f"HAR_Method_Atlas_{saved['analysis_id']}.md" in exported_md.headers["content-disposition"]
+    assert "Source Method Paper" in exported_md.text and "extends" in exported_md.text
+    for exported in (history.text, loaded.text, exported_json.text, exported_md.text):
+        assert "test-secret-that-must-not-return" not in exported
+        assert "Authorization" not in exported and str(tmp_path) not in exported
 
 
 def test_analyze_without_api_key_returns_safe_configuration_error(
@@ -227,6 +259,7 @@ def test_analyze_without_api_key_returns_safe_configuration_error(
         ("upstream", 502, 3),
         ("malformed", 502, 1),
         ("truncated", 502, 1),
+        ("validation", 502, 1),
     ],
 )
 def test_analyze_maps_llm_failures_to_safe_http_errors(
@@ -252,6 +285,13 @@ def test_analyze_maps_llm_failures_to_safe_http_errors(
             raise httpx.ReadTimeout("private transport detail")
         if kind == "malformed":
             return httpx.Response(200, json={"choices": []})
+        if kind == "validation":
+            return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({
+                "analysis_status": "probable", "relation_type": "extends", "confidence": 0.7,
+                "uncertainty": "", "relation_evidence_ids": ["T999"],
+                "inherited_components": [], "changed_components": [], "added_components": [], "removed_components": [],
+                "problem_addressed": None, "claimed_contribution": None, "experimental_evidence": [], "limitations": [], "method_changes": [],
+            })}}]})
         return httpx.Response(
             200,
             json={"choices": [{"finish_reason": "length", "message": {"content": "{"}}]},
@@ -273,6 +313,7 @@ def test_analyze_maps_llm_failures_to_safe_http_errors(
     assert "never-return-this-secret" not in response.text
     assert "private transport detail" not in response.text
     assert "secret gateway details" not in response.text
+    assert not (papers_dir.parent / "analyses").exists()
 
 
 def test_local_papers_page_has_separate_preview_and_confirmed_analysis_actions(
@@ -361,3 +402,68 @@ def test_analyze_groups_only_final_verified_evidence_for_web_regions(tmp_path, m
     assert [item["quote"] for item in payload["analysis"]["method_changes"][0]["evidence"]] == [source.text, target.text]
     assert "web-group-secret-must-not-return" not in response.text
     assert str(tmp_path) not in response.text
+
+
+@pytest.mark.parametrize("analysis_id", ["..%5Cx", "x%5Cy", "..%2Fx", "x%2Fy", "x.json"])
+def test_history_path_traversal_is_rejected_with_safe_errors(tmp_path, monkeypatch, analysis_id) -> None:
+    app, _ = _make_app(tmp_path, monkeypatch)
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid history paths must never call the LLM")
+    monkeypatch.setattr(server_module, "OpenAICompatibleLineageClient", forbidden)
+    with TestClient(app) as client:
+        response = client.get(f"/api/local/lineage/history/{analysis_id}")
+    assert response.status_code in {400, 404}
+    assert str(tmp_path) not in response.text
+
+
+def test_empty_and_corrupt_history_are_safe_and_do_not_parse_pdfs(tmp_path, monkeypatch) -> None:
+    app, papers_dir = _make_app(tmp_path, monkeypatch)
+    def forbidden(*args, **kwargs):
+        pytest.fail("listing history must not call the LLM or parse PDFs")
+    monkeypatch.setattr(server_module, "OpenAICompatibleLineageClient", forbidden)
+    monkeypatch.setattr(server_module, "build_local_lineage_context", forbidden)
+    with TestClient(app) as client:
+        empty = client.get("/api/local/lineage/history")
+        assert empty.status_code == 200 and empty.json() == []
+        assert not (papers_dir.parent / "analyses").exists()
+        directory = papers_dir.parent / "analyses"
+        directory.mkdir()
+        analysis_id = "20261003T103000Z_abcdef123456"
+        (directory / f"{analysis_id}.json").write_text("{broken", encoding="utf-8")
+        history = client.get("/api/local/lineage/history")
+        corrupted = client.get(f"/api/local/lineage/history/{analysis_id}")
+        missing = client.get("/api/local/lineage/history/20261003T103000Z_123456abcdef")
+    assert history.status_code == 200 and history.json() == []
+    assert corrupted.status_code == 422 and missing.status_code == 404
+    assert str(tmp_path) not in corrupted.text + missing.text
+
+
+def test_disk_save_failure_still_returns_completed_analysis_without_extra_llm_call(tmp_path, monkeypatch) -> None:
+    app, papers_dir = _make_app(tmp_path, monkeypatch)
+    _write_pair(papers_dir)
+    calls = []
+    class FakeClient:
+        configured = True
+        model = "mock-model"
+        def analyze(self, context, *, max_tokens):
+            calls.append(max_tokens)
+            return {
+                "analysis_status": "insufficient_evidence", "relation_type": None,
+                "confidence": 0.2, "uncertainty": "Limited evidence.", "relation_evidence_ids": [],
+                "inherited_components": [], "changed_components": [], "added_components": [], "removed_components": [],
+                "problem_addressed": None, "claimed_contribution": None, "experimental_evidence": [], "limitations": [], "method_changes": [],
+            }
+        def close(self):
+            pass
+    def cannot_save(*args, **kwargs):
+        raise OSError("private local path and disk failure")
+    monkeypatch.setattr(server_module, "OpenAICompatibleLineageClient", FakeClient)
+    monkeypatch.setattr(server_module, "save_analysis", cannot_save)
+    with TestClient(app) as client:
+        response = client.post("/api/local/lineage/analyze", json=_request())
+    assert response.status_code == 200, response.text
+    assert response.json()["analysis"]["analysis_status"] == "insufficient_evidence"
+    assert response.json()["saved_analysis"] is None
+    assert "分析已完成，但本地保存失败。" in response.json()["warnings"]
+    assert "private" not in response.text and calls == [4000]
+    assert not (papers_dir.parent / "analyses").exists()

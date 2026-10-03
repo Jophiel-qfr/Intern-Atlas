@@ -90,3 +90,18 @@ def test_local_papers_ui_keeps_narrow_layout_and_original_evidence_escaping() ->
     assert "不确定性说明：" in html
     assert "查看为什么没有达到已确认" in html
     assert "未发现有充分证据支持的内容。" in html
+
+
+
+def test_history_ui_has_local_only_open_and_download_actions_and_saved_notices() -> None:
+    html = get_local_papers_html("zh-CN")
+    for label in ("历史分析", "查看结果", "导出 JSON", "导出 Markdown", "已自动保存", "已保存结果 · 不会调用 LLM"):
+        assert label in html
+    script = _local_script(html)
+    history = script.split("let historyLoadRevision = 0;", 1)[1].split("$('analyzeLineageBtn').addEventListener", 1)[0]
+    assert "requestJson('/api/local/lineage/history')" in history
+    assert "renderLineageResult(data, true)" in history
+    assert '}/json' in history and '}/markdown' in history
+    assert not any(word in history for word in ("postLineage(", "/lineage/analyze", "/lineage/preview"))
+    assert "loadAnalysisHistory();" in script
+    assert "saved_analysis" in script

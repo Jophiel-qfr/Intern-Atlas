@@ -1,5 +1,6 @@
 """FastAPI app for querying a local Intern Atlas SQLite graph."""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,11 @@ import httpx
 
 from .db import connect, graph_stats, paper_summary
 from .config import get_settings
+from .i18n import translate_ui_text
+from .local_analysis_store import (
+    CorruptedSavedAnalysis, InvalidAnalysisId, LocalAnalysisStoreError,
+    SavedAnalysisNotFound, list_analyses, load_analysis, render_analysis_markdown, save_analysis,
+)
 from .discovery import DiscoveryService
 from .evidence_input import EvidenceExtractionError
 from .evidence import (
@@ -51,7 +57,7 @@ from .ui import get_index_html, get_local_papers_html
 def create_app(db_path: str | Path, discovery_service: DiscoveryService | None = None):
     from fastapi import FastAPI, HTTPException, Query
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, Response
     from pydantic import BaseModel, Field
 
     conn = connect(db_path, readonly=True)
@@ -68,6 +74,7 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
     settings = get_settings()
     extra_origins = list(settings.cors_origins)
     papers_dir = settings.data_dir / "papers"
+    analyses_dir = settings.data_dir / "analyses"
     app.add_middleware(
         CORSMiddleware,
         allow_origins=extra_origins,
@@ -344,6 +351,46 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
                     groups[key].append(item.to_dict())
         return groups
 
+    def load_saved_local_analysis(analysis_id: str) -> dict[str, Any]:
+        try:
+            return load_analysis(analyses_dir, analysis_id)
+        except InvalidAnalysisId as exc:
+            raise HTTPException(status_code=400, detail=translate_ui_text("Invalid saved analysis ID.", settings.ui_language)) from exc
+        except SavedAnalysisNotFound as exc:
+            raise HTTPException(status_code=404, detail=translate_ui_text("Saved analysis not found.", settings.ui_language)) from exc
+        except CorruptedSavedAnalysis as exc:
+            raise HTTPException(status_code=422, detail=translate_ui_text("Could not read this saved analysis; the file may be corrupted or unsupported.", settings.ui_language)) from exc
+        except (LocalAnalysisStoreError, OSError) as exc:
+            raise HTTPException(status_code=503, detail=translate_ui_text("Could not read local analysis history.", settings.ui_language)) from exc
+
+    @app.get("/api/local/lineage/history")
+    def local_lineage_history() -> list[dict[str, Any]]:
+        try:
+            return list_analyses(analyses_dir)
+        except (LocalAnalysisStoreError, OSError) as exc:
+            raise HTTPException(status_code=503, detail=translate_ui_text("Could not read local analysis history.", settings.ui_language)) from exc
+
+    @app.get("/api/local/lineage/history/{analysis_id}")
+    def local_lineage_history_record(analysis_id: str) -> dict[str, Any]:
+        return load_saved_local_analysis(analysis_id)
+
+    @app.get("/api/local/lineage/history/{analysis_id}/json")
+    def download_local_lineage_json(analysis_id: str):
+        record = load_saved_local_analysis(analysis_id)
+        return Response(
+            content=json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="HAR_Method_Atlas_{analysis_id}.json"'},
+        )
+
+    @app.get("/api/local/lineage/history/{analysis_id}/markdown")
+    def download_local_lineage_markdown(analysis_id: str):
+        record = load_saved_local_analysis(analysis_id)
+        return Response(
+            content=render_analysis_markdown(record), media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="HAR_Method_Atlas_{analysis_id}.md"'},
+        )
+
     @app.post("/api/local/lineage/analyze")
     def analyze_local_lineage(req: LocalLineageRequest) -> dict[str, Any]:
         source, target, context = prepare_local_lineage(req)
@@ -356,7 +403,7 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
                 )
             llm_response = client.analyze(context, max_tokens=4000)
             analysis = build_method_lineage_analysis(context, llm_response)
-            return {
+            payload = {
                 "source": source,
                 "target": target,
                 "analysis": analysis.to_dict(),
@@ -365,6 +412,13 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
                 "selected_evidence": selected_evidence_payload(context),
                 "warnings": list(context.warnings),
             }
+            try:
+                payload["saved_analysis"] = save_analysis(analyses_dir, payload)
+            except (LocalAnalysisStoreError, OSError) as exc:
+                # An already completed analysis remains usable if disk persistence fails.
+                payload["saved_analysis"] = None
+                payload["warnings"].append(translate_ui_text("Analysis completed, but local saving failed.", settings.ui_language))
+            return payload
         except LineageLLMConfigurationError as exc:
             raise HTTPException(
                 status_code=503,

@@ -16,6 +16,24 @@ UI_TRANSLATIONS = {
     "zh-CN": {
         "Evidence layer for research agents": "面向科研智能体的证据层",
         "Local papers": "本地论文",
+        "Analysis history": "历史分析",
+        "Refresh history": "刷新历史",
+        "Loading saved analyses...": "正在加载历史分析……",
+        "No saved analysis results yet.": "还没有已保存的分析结果。",
+        "Could not load analysis history.": "无法加载历史分析。",
+        "View result": "查看结果",
+        "Export JSON": "导出 JSON",
+        "Export Markdown": "导出 Markdown",
+        "Automatically saved": "已自动保存",
+        "Saved result · does not call an LLM": "已保存结果 · 不会调用 LLM",
+        "Loading saved result...": "正在读取已保存结果……",
+        "Could not open saved result.": "无法打开已保存结果。",
+        "Model:": "模型：",
+        "Analysis completed, but local saving failed.": "分析已完成，但本地保存失败。",
+        "Invalid saved analysis ID.": "分析记录编号无效。",
+        "Saved analysis not found.": "未找到已保存的分析结果。",
+        "Could not read this saved analysis; the file may be corrupted or unsupported.": "无法读取该分析记录，文件可能损坏或版本不受支持。",
+        "Could not read local analysis history.": "无法读取本地分析历史。",
         "PDF files in the configured data/papers directory.": "查看配置的数据目录中 papers 文件夹里的 PDF。",
         "Back to workspace": "返回证据工作区",
         "Local PDF list": "本地 PDF 列表",
@@ -224,3 +242,10 @@ def localize_ui_html(template: str, language: str | None = None) -> str:
         pattern = rf"(?<![A-Za-z0-9_]){re.escape(source)}(?![A-Za-z0-9_])"
         html = re.sub(pattern, target, html)
     return html
+
+
+
+def translate_ui_text(text: str, language: str | None = None) -> str:
+    """Translate fixed non-HTML notices shared by the API and browser UI."""
+    language = language or get_settings().ui_language
+    return UI_TRANSLATIONS.get(language, UI_TRANSLATIONS["en-US"]).get(text, text)
