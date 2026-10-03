@@ -328,6 +328,22 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
             ],
         }
 
+    def evidence_groups_payload(analysis) -> dict[str, list[dict[str, Any]]]:
+        """UI groups contain only locally validated final EvidenceItems."""
+        groups = {name: [] for name in (
+            "relation", "inherited_components", "changed_components", "added_components",
+            "removed_components", "problem_addressed", "claimed_contribution",
+            "experimental_evidence", "limitations",
+        )}
+        for item in analysis.evidence:
+            supports = item.supports if isinstance(item.supports, list) else [item.supports]
+            # One item can support several regions; preserve final evidence order.
+            keys = dict.fromkeys("limitations" if key == "limitation" else key for key in supports)
+            for key in keys:
+                if key in groups:
+                    groups[key].append(item.to_dict())
+        return groups
+
     @app.post("/api/local/lineage/analyze")
     def analyze_local_lineage(req: LocalLineageRequest) -> dict[str, Any]:
         source, target, context = prepare_local_lineage(req)
@@ -344,6 +360,7 @@ def create_app(db_path: str | Path, discovery_service: DiscoveryService | None =
                 "source": source,
                 "target": target,
                 "analysis": analysis.to_dict(),
+                "evidence_groups": evidence_groups_payload(analysis),
                 "model": client.model,
                 "selected_evidence": selected_evidence_payload(context),
                 "warnings": list(context.warnings),

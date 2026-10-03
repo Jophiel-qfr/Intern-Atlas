@@ -289,3 +289,75 @@ def test_local_papers_page_has_separate_preview_and_confirmed_analysis_actions(
     assert "本次操作将调用已配置的 LLM API，可能产生费用。是否继续？" in page.text
     assert "/api/local/lineage/preview" in page.text
     assert "/api/local/lineage/analyze" in page.text
+
+
+
+def test_analyze_groups_only_final_verified_evidence_for_web_regions(tmp_path, monkeypatch) -> None:
+    app, papers_dir = _make_app(tmp_path, monkeypatch)
+    _write_pair(papers_dir)
+    _clear_llm_environment(monkeypatch)
+    monkeypatch.setenv("LLM_BASE_URL", "https://mock-llm.invalid/v1")
+    monkeypatch.setenv("LLM_API_KEY", "web-group-secret-must-not-return")
+    monkeypatch.setenv("LLM_MODEL", "mock-lineage-model")
+    _, _, context = server_module.build_local_lineage_context(papers_dir, "source.pdf", "target.pdf")
+    source = next(item for item in context.selected_evidence if item.paper_role == "source" and item.section == "methods")
+    target = next(item for item in context.selected_evidence if item.paper_role == "target" and item.section == "methods")
+    result = next(item for item in context.selected_evidence if item.paper_role == "target" and item.section == "results")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        raw = {
+            "analysis_status": "probable", "relation_type": "extends", "confidence": 0.75,
+            "uncertainty": "The supplied excerpts leave some comparison details incomplete.",
+            "relation_evidence_ids": [source.evidence_id, target.evidence_id, target.evidence_id],
+            "inherited_components": [{"text": "CNN and recurrent feature processing", "evidence_ids": [source.evidence_id, target.evidence_id]}],
+            "changed_components": [],
+            "added_components": [{"text": "Model claim text must never become an evidence quote.", "evidence_ids": [target.evidence_id]}],
+            "removed_components": [],
+            "problem_addressed": {"text": "Temporal activity modeling", "evidence_ids": [target.evidence_id]},
+            "claimed_contribution": {"text": "A recurrent method for activity recognition", "evidence_ids": [target.evidence_id]},
+            "experimental_evidence": [{"text": "Recognition performance is compared across subjects", "evidence_ids": [result.evidence_id]}],
+            "limitations": [{"text": "The context leaves comparison details incomplete", "evidence_ids": [target.evidence_id]}],
+            "method_changes": [{
+                "component": "temporal_modeling", "change_type": "inherited",
+                "from_value": "recurrent layer", "to_value": "recurrent layer",
+                "description": "Retains recurrent temporal processing.",
+                "evidence_ids": [source.evidence_id, target.evidence_id], "confidence": 0.75,
+            }],
+        }
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(raw)}}]})
+
+    monkeypatch.setattr(server_module, "OpenAICompatibleLineageClient", lambda: OpenAICompatibleLineageClient(
+        transport=httpx.MockTransport(handler), sleep_fn=lambda _seconds: None,
+    ))
+    with TestClient(app) as client:
+        response = client.post("/api/local/lineage/analyze", json=_request())
+    assert response.status_code == 200, response.text
+    assert len(calls) == 1 and calls[0]["max_tokens"] == 4000
+    payload = response.json()
+    groups = payload["evidence_groups"]
+    assert set(groups) == {
+        "relation", "inherited_components", "changed_components", "added_components",
+        "removed_components", "problem_addressed", "claimed_contribution",
+        "experimental_evidence", "limitations",
+    }
+    assert [item["quote"] for item in groups["relation"]] == [source.text, target.text]
+    assert [item["quote"] for item in groups["inherited_components"]] == [source.text, target.text]
+    for name in ("added_components", "problem_addressed", "claimed_contribution", "limitations"):
+        assert [item["quote"] for item in groups[name]] == [target.text]
+    assert [item["quote"] for item in groups["experimental_evidence"]] == [result.text]
+    assert groups["changed_components"] == groups["removed_components"] == []
+    final_evidence = payload["analysis"]["evidence"]
+    for items in groups.values():
+        for item in items:
+            assert item in final_evidence
+            assert item["paper_title"] in {context.source_paper_title, context.target_paper_title}
+            assert item["source_kind"] == "pdf"
+            assert item["section"] and item["location"]
+            assert item["quote"] in {source.text, target.text, result.text}
+    assert "limitation" in groups["limitations"][0]["supports"]
+    assert groups["experimental_evidence"][0]["supports"] == "experimental_evidence"
+    assert [item["quote"] for item in payload["analysis"]["method_changes"][0]["evidence"]] == [source.text, target.text]
+    assert "web-group-secret-must-not-return" not in response.text
+    assert str(tmp_path) not in response.text
